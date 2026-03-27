@@ -52,17 +52,19 @@ async def test_call_tool_handles_async_and_json_result():
     assert json.loads(res["contentItems"][0]["text"]) == dict(total=5)
 
 
-def test_completed_dynamic_tool_block_is_parseable():
+def test_completed_dynamic_tool_produces_compact_format():
     client = cc._CodexAppServer()
-    item = dict(type="dynamicToolCall", id="call_1", tool="load_skill", arguments=dict(path="/tmp/s"), success=True,
-        contentItems=[dict(type="inputText", text="---\nallowed-tools: helper\n---\nbody")])
+    item = dict(type="dynamicToolCall", id="call_1", tool="greet", arguments=dict(name="world"), success=True,
+        contentItems=[dict(type="inputText", text="hello world")])
     text = client._completed_item_text(item, set(), {})
+    assert text == "\n\n🔧 greet(name='world') => hello world\n"
 
-    m = cc.re_tools.search(text)
-    assert m is not None
-    payload = json.loads(m.group(3))
-    assert payload["call"]["function"] == "load_skill"
-    assert "allowed-tools" in payload["result"]
+
+def test_completed_command_produces_compact_format():
+    client = cc._CodexAppServer()
+    item = dict(type="commandExecution", id="cmd_1", command="echo hi", cwd="/tmp", exitCode=0, aggregatedOutput="hi\n")
+    text = client._completed_item_text(item, set(), {})
+    assert text == "\n\n🔧 echo hi => hi\n"
 
 
 async def test_consume_turn_emits_command_stream_events():
@@ -83,8 +85,7 @@ async def test_consume_turn_emits_command_stream_events():
     assert chunks[:2] == [dict(kind="command_start", id="cmd_1", command="printf hi", cwd="/tmp"),
         dict(kind="command_delta", id="cmd_1", delta="hi\n", command="printf hi", cwd="/tmp")]
     assert chunks[2]["kind"] == "command_complete"
-    assert "printf hi" in chunks[2]["text"]
-    assert '"result": "hi\\n"' in chunks[2]["text"]
+    assert "\n\n🔧 printf hi => hi" in chunks[2]["text"]
 
 
 async def test_consume_turn_emits_thinking_events():
@@ -130,7 +131,7 @@ async def test_async_stream_formatter_thinking_blockquotes_display_and_stores_ta
 
 
 async def test_async_stream_formatter_streams_live_command_text_only_to_display():
-    final = cc._tool_block("<code>printf hi</code>", dict(result="hi\n"))
+    final = "\n\n🔧 printf hi => hi\n"
     fmt = cc.AsyncStreamFormatter()
     fmt.is_tty = True
     seen = []
@@ -142,4 +143,4 @@ async def test_async_stream_formatter_streams_live_command_text_only_to_display(
     assert any("⌛ <code>printf hi</code>" in o for o in seen[:2])
     assert any("hi\n" in o for o in seen[:2])
     assert fmt.final_text == final
-    assert "⌛ <code>printf hi</code>" not in fmt.final_text
+    assert "⌛" not in fmt.final_text

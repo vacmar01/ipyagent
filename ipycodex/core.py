@@ -9,7 +9,7 @@ from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
-from .codex_client import AsyncChat,AsyncStreamFormatter,FullResponse,re_tools
+from .codex_client import AsyncChat,AsyncStreamFormatter
 from rich.console import Console
 from rich.file_proxy import FileProxy
 from rich.live import Live
@@ -63,8 +63,6 @@ You have these key dynamic tools available:
 - `bash(cmd)`: Run the local allowlisted shell helper when you specifically need it from the user's namespace.
 
 Only dynamic tools can see live IPython objects. Server-side shell and file actions cannot.
-
-If a `<skills>` section is appended to this system prompt, it lists available skills. When a user's request matches a skill description, call the `load_skill` tool with the skill's path to load its full instructions before responding.
 
 Assume you are helping an interactive Python user. Prefer concise, accurate, practical responses. When writing code, default to Python unless the user asks for something else.
 """
@@ -175,24 +173,10 @@ def _allowed_tools(text):
     return names
 
 
-def _tool_results(response):
-    "Extract tool names from load_skill results in a stored AI response."
-    names = set()
-    for m in re_tools.finditer(response or ""):
-        try: payload = json.loads(m.group(3))
-        except Exception: continue
-        if payload.get("call", {}).get("function") != "load_skill": continue
-        result = str(payload.get("result", ""))
-        names |= _allowed_tools(result)
-    return names
-
-
-def _tool_refs(prompt, hist, skills=None, notes=None, responses=None):
+def _tool_refs(prompt, hist, notes=None):
     names = _tool_names(prompt)
     for o in hist: names |= _tool_names(o["prompt"])
-    if skills: names.add("load_skill")
     for n in (notes or []): names |= _allowed_tools(n)
-    for r in (responses or []): names |= _tool_results(r)
     return names
 
 
@@ -209,11 +193,9 @@ def _exposed_vars(text):
     return names
 
 
-def _var_refs(prompt, hist, skills=None, notes=None, responses=None):
+def _var_refs(prompt, hist, notes=None):
     names = _var_names(prompt)
     for o in hist: names |= _var_names(o["prompt"])
-    if skills:
-        for s in skills: names |= set(s.get("vars") or [])
     for n in (notes or []): names |= _exposed_vars(n)
     return names
 
@@ -240,11 +222,9 @@ def _shell_cmds(text):
     return names
 
 
-def _shell_refs(prompt, hist, skills=None, notes=None):
+def _shell_refs(prompt, hist, notes=None):
     names = _shell_names(prompt)
     for o in hist: names |= _shell_names(o["prompt"])
-    if skills:
-        for s in skills: names |= set(s.get("shell_cmds") or [])
     for n in (notes or []): names |= _shell_cmds(n)
     return names
 
@@ -263,12 +243,6 @@ def _run_shell_refs(cmds):
 def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" else 1
 
 
-def _single_line(s: str) -> str: return re.sub(r"\s+", " ", s.strip())
-
-def compact_tool_display(text: str) -> str:
-    return re_tools.sub(lambda m: f"🔧 {_single_line(m.group('summary'))}\n", text)
-
-
 def _thinking_to_blockquote(text):
     def _bq(m):
         from .codex_client import _blockquote
@@ -276,7 +250,7 @@ def _thinking_to_blockquote(text):
     return re.sub(r'<thinking>\n(.*?)\n</thinking>\n*', _bq, text, flags=re.DOTALL)
 
 
-def _display_text(text): return _thinking_to_blockquote(compact_tool_display(text))
+def _display_text(text): return _thinking_to_blockquote(text)
 
 
 def _markdown_renderable(text: str, code_theme: str, markdown_cls=Markdown):
@@ -422,67 +396,6 @@ def _load_notebook(path) -> list:
     return [e for c in data.get("cells", []) if (e := _cell_to_event(c)) is not None]
 
 
-def _parse_skill(path):
-    skill_md = Path(path) / "SKILL.md"
-    if not skill_md.exists(): return None
-    text = skill_md.read_text()
-    fm, body = frontmatter(text)
-    if not fm: return None
-    name = fm.get('name', '')
-    if not name: return None
-    tools = list(_allowed_tools(text))
-    vars = list(_exposed_vars(text))
-    shell_cmds = list(_shell_cmds(text))
-    return dict(name=name, path=str(path), description=fm.get('description', ''), tools=tools, vars=vars, shell_cmds=shell_cmds)
-
-
-def _discover_skills(cwd=None):
-    skills,seen = [],set()
-    def _scan(skills_dir):
-        if not skills_dir.is_dir(): return
-        for p in sorted(skills_dir.iterdir()):
-            rp = str(p.resolve())
-            if not p.is_dir() or rp in seen: continue
-            skill = _parse_skill(p)
-            if skill:
-                seen.add(rp)
-                skills.append(skill)
-    d = Path(cwd) if cwd else Path.cwd()
-    while True:
-        _scan(d / '.agents' / 'skills')
-        if d.parent == d: break
-        d = d.parent
-    _scan(Path.home() / '.config' / 'agents' / 'skills')
-    return skills
-
-
-def _skills_xml(skills):
-    if not skills: return ""
-    parts = ["The following skills are available. To activate a skill and read its full instructions, call the load_skill tool with its path."]
-    for s in skills: parts.append(f'<skill name="{s["name"]}" path="{s["path"]}">{s["description"]}</skill>')
-    return "\n" + _tag("skills", "\n".join(parts))
-
-
-_eval_re = re.compile(r'^#\|\s*eval:\s*true\s*$', re.MULTILINE)
-
-async def _eval_code_blocks(text, shell):
-    "Run python code blocks starting with `#| eval: true` via `shell.run_cell_async`."
-    for block in _extract_code_blocks(text):
-        if _eval_re.match(block.split('\n', 1)[0]): await shell.run_cell_async(block, store_history=False, transformed_cell=block)
-
-_eval_block_re = re.compile(r"```(?:python|py)\s*\n#\|\s*eval:\s*true\b.*?```\s*\n?", flags=re.DOTALL)
-
-async def load_skill(path:str):  # path: Path to the skill directory
-    "Load a skill's full instructions from its SKILL.md file."
-    p = Path(path) / "SKILL.md"
-    if not p.exists(): return FullResponse(f"Error: SKILL.md not found at {p}")
-    text = p.read_text()
-    shell = get_ipython()
-    if shell: await _eval_code_blocks(text, shell)
-    return FullResponse(_eval_block_re.sub('', text))
-
-
-
 def _git_repo_root(path):
     "Walk up from `path` looking for `.git`, return repo root or None."
     p = Path(path).resolve()
@@ -555,8 +468,6 @@ class IPyAIExtension:
         self.code_theme = str(code_theme or cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
-        self.skills = _discover_skills()
-        if self.skills: shell.user_ns["load_skill"] = load_skill
         from safecmd import bash, ex, sed
         from safepyrun import doc
         shell.user_ns.setdefault("bash", bash)
@@ -637,13 +548,13 @@ class IPyAIExtension:
         "Return note string values from code history in range."
         return [_note_str(src) for _,_,pair in self.code_history(start, stop) if (src := pair[0]) and _is_note(src)]
 
-    def resolve_tools(self, prompt, hist, skills=None, notes=None, responses=None):
+    def resolve_tools(self, prompt, hist, notes=None):
         ns = self.shell.user_ns
-        all_refs = _tool_refs(prompt, hist, skills=skills, notes=notes, responses=responses)
+        check_refs = _tool_refs(prompt, hist, notes=notes)
+        all_refs = set(check_refs)
         for t in ("pyrun", "bash", "ex", "sed"):
             if callable(ns.get(t)): all_refs.add(t)
         tools = [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(all_refs) if callable(ns.get(o))]
-        check_refs = _tool_refs(prompt, hist, notes=notes, responses=responses)
         bad = sorted(o for o in check_refs if o not in ns or not callable(ns.get(o)))
         return tools, bad
 
@@ -917,21 +828,20 @@ class IPyAIExtension:
         if not prompt.strip(): return None
         history_line = self.current_prompt_line()
         hist,recs = self.dialog_history()
-        # Collect notes and responses for tool resolution
+        # Collect notes for tool resolution
         notes = []
         prev_line = self.reset_line
         for o in recs:
             notes += self.note_strings(prev_line+1, o["history_line"])
             prev_line = o["history_line"]
         notes += self.note_strings(self.last_prompt_line()+1, history_line)
-        responses = [o["response"] for o in recs]
-        tools, bad_tools = self.resolve_tools(prompt, recs, skills=self.skills, notes=notes, responses=responses)
+        tools, bad_tools = self.resolve_tools(prompt, recs, notes=notes)
         ns = self.shell.user_ns
-        var_names = _var_refs(prompt, recs, skills=self.skills, notes=notes)
+        var_names = _var_refs(prompt, recs, notes=notes)
         missing_vars = sorted(n for n in var_names if n not in ns)
         all_missing = sorted(set(bad_tools + missing_vars))
         var_xml = _format_var_xml(var_names, ns)
-        shell_cmds = _shell_refs(prompt, recs, skills=self.skills, notes=notes)
+        shell_cmds = _shell_refs(prompt, recs, notes=notes)
         shell_xml = _run_shell_refs(shell_cmds)
         warnings = ""
         if all_missing: warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(all_missing)}") + "\n"
@@ -940,7 +850,6 @@ class IPyAIExtension:
         full_prompt = warnings + prefix + full_prompt
         self.shell.user_ns[LAST_PROMPT] = prompt
         sp = self.system_prompt
-        if self.skills: sp += _skills_xml(self.skills)
         chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
         stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
         loop = asyncio.get_running_loop()

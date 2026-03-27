@@ -88,9 +88,6 @@ class FullResponse(str):
     def content(self): return str(self)
 
 
-re_tools = re.compile(r"(<details class='tool-usage-details'>\s*<summary>(?P<summary>.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>)",
-    flags=re.DOTALL)
-
 
 def _pkg_version():
     try:
@@ -140,19 +137,18 @@ def _search_cfg(search):
 def _effort_level(level): return dict(l="low", m="medium", h="high").get(level, level or None)
 
 
-def _tool_summary(name, args):
-    if not args: return f"<code>{html.escape(name)}()</code>"
-    bits = ", ".join(f"{k}={v!r}" for k,v in sorted((args or {}).items()))
-    return f"<code>{html.escape(name)}({html.escape(bits)})</code>"
+def _compact_tool(name, args, result):
+    call = f"{name}()" if not args else f"{name}({', '.join(f'{k}={v!r}' for k,v in sorted(args.items()))})"
+    res = (result or "").strip().replace("\n", " ")
+    if len(res) > 80: res = res[:77] + "..."
+    return f"\n\n🔧 {call} => {res}\n" if res else f"\n\n🔧 {call}\n"
 
 
-def _tool_block(summary, payload):
-    return ("<details class='tool-usage-details'>\n"
-        f"<summary>{summary}</summary>\n\n"
-        "```json\n"
-        f"{_json(payload)}\n"
-        "```\n\n"
-        "</details>\n")
+def _compact_cmd(command, output, exit_code):
+    res = (output or "").strip().replace("\n", " ")
+    if len(res) > 80: res = res[:77] + "..."
+    status = "" if exit_code in (None, 0) else f" [exit {exit_code}]"
+    return f"\n\n🔧 {command}{status} => {res}\n" if res else f"\n\n🔧 {command}{status}\n"
 
 
 def _fenced_block(text, info=""):
@@ -279,7 +275,7 @@ class _CodexAppServer:
     def _turn_params(self, thread_id, prompt, *, hist=None, think=None, output_schema=None):
         text = _history_xml(hist) + prompt
         params = dict(threadId=thread_id, input=[dict(type="text", text=text, text_elements=[])], cwd=os.getcwd(),
-            approvalPolicy="never", personality="pragmatic")
+            approvalPolicy="never", personality="pragmatic", summary="detailed")
         if (effort := _effort_level(think)): params["effort"] = effort
         if output_schema is not None: params["outputSchema"] = output_schema
         return params
@@ -307,7 +303,7 @@ class _CodexAppServer:
                     yield dict(kind="command_start", id=item.get("id"), command=item.get("command"), cwd=item.get("cwd"))
                 elif item.get("type") == "agentMessage" and saw_text and item.get("phase") == "final_answer": yield "\n\n"
                 continue
-            if method == "item/reasoning/textDelta":
+            if method in ("item/reasoning/textDelta", "item/reasoning/summaryTextDelta"):
                 yield dict(kind="thinking_delta", delta=params.get("delta", ""))
                 continue
             if method == "item/agentMessage/delta":
@@ -359,15 +355,11 @@ class _CodexAppServer:
             if item.get("id") in agent_seen: return ""
             return item.get("text", "")
         if typ == "dynamicToolCall":
-            payload = dict(id=item.get("id"), call=dict(function=item.get("tool"), arguments=item.get("arguments") or {}),
-                result=_content_items_text(item.get("contentItems")), success=item.get("success"))
-            return _tool_block(_tool_summary(item.get("tool", "tool"), item.get("arguments") or {}), payload)
+            return _compact_tool(item.get("tool", "tool"), item.get("arguments") or {}, _content_items_text(item.get("contentItems")))
         if typ == "commandExecution":
             output = item.get("aggregatedOutput")
             if output is None: output = cmd_output.get(item.get("id"), "")
-            payload = dict(id=item.get("id"), call=dict(function="commandExecution", arguments=dict(command=item.get("command"), cwd=item.get("cwd"))),
-                result=output, exit_code=item.get("exitCode"), status=item.get("status"))
-            return _tool_block(f"<code>{html.escape(item.get('command') or '')}</code>", payload)
+            return _compact_cmd(item.get("command") or "", output, item.get("exitCode"))
         return ""
 
 

@@ -6,10 +6,10 @@ from IPython.core.inputtransformer2 import TransformerManager
 
 import ipycodex.core as core
 from ipycodex.core import (DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK, EXTENSION_NS,
-    IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS, _allowed_tools, _discover_skills, _eval_code_blocks,
-    _extract_code_blocks, _format_var_xml, _git_repo_root, _list_sessions, _parse_skill, _shell_names, _shell_refs, _skills_xml,
-    _thinking_to_blockquote, _tool_refs, _tool_results, _run_shell_refs, _var_names, _var_refs, astream_to_stdout, compact_tool_display,
-    load_skill, prompt_from_lines, resume_session, transform_dots, transform_prompt_mode)
+    IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS, _allowed_tools,
+    _extract_code_blocks, _format_var_xml, _git_repo_root, _list_sessions, _shell_names, _shell_refs,
+    _thinking_to_blockquote, _tool_refs, _run_shell_refs, _var_names, _var_refs, astream_to_stdout,
+    prompt_from_lines, resume_session, transform_dots, transform_prompt_mode)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -124,7 +124,6 @@ def _config_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(core, "CONFIG_PATH", cfg_dir/"config.json")
     monkeypatch.setattr(core, "SYSP_PATH", cfg_dir/"sysp.txt")
     monkeypatch.setattr(core, "LOG_PATH", cfg_dir/"exact-log.jsonl")
-    monkeypatch.setattr(core, "_discover_skills", lambda: [])
 
 
 @pytest.fixture
@@ -174,41 +173,14 @@ def test_astream_to_stdout_collects_streamed_text():
     assert out.getvalue() == "ab\n"
 
 
-def test_compact_tool_display_replaces_details_with_summary():
-    text = """Before
-
-<details class='tool-usage-details'>
-<summary>MYSUMMARY</summary>
-
-```json
-{"id":"toolu_1","call":{"function":"f","arguments":{}},"result":"ok"}
-```
-
-</details>
-
-After"""
-    res = compact_tool_display(text)
-    assert "🔧 MYSUMMARY" in res
-    assert "<details" not in res
-    assert "Before" in res and "After" in res
-
-
 def test_astream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
-    tool_block = """<details class='tool-usage-details'>
-<summary>MYSUMMARY</summary>
-
-```json
-{"id":"toolu_1","call":{"function":"f","arguments":{}},"result":"ok"}
-```
-
-</details>"""
+    tool_text = "\n\n🔧 f() => ok\n"
     DummyConsole.instances = []
     DummyLive.instances = []
     out = TTYStringIO()
-    text = run_stream(tool_block, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
-    assert text == tool_block
-    assert "🔧 MYSUMMARY" in out.getvalue()
-    assert "🔧 MYSUMMARY" in DummyLive.instances[-1].renderables[-1].text
+    text = run_stream(tool_text, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
+    assert text == tool_text
+    assert "🔧 f() => ok" in DummyLive.instances[-1].renderables[-1].text
 
 
 def test_astream_to_stdout_uses_rich_markdown_options_for_live_updates():
@@ -631,113 +603,6 @@ def test_cleanup_transform_prevents_help_syntax_interference():
     assert tm.check_complete(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
 
 
-def _mk_skill(root, name, description="A test skill."):
-    d = root / name
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\nInstructions here.\n")
-    return d
-
-
-def test_parse_skill(tmp_path):
-    d = _mk_skill(tmp_path, "my-skill", "Does things.")
-    s = _parse_skill(d)
-    assert s == dict(name="my-skill", path=str(d), description="Does things.", tools=[], vars=[], shell_cmds=[])
-
-
-def test_parse_skill_missing_file(tmp_path): assert _parse_skill(tmp_path / "nope") is None
-
-
-def test_parse_skill_missing_name(tmp_path):
-    d = tmp_path / "bad"
-    d.mkdir()
-    (d / "SKILL.md").write_text("---\ndescription: no name\n---\n")
-    assert _parse_skill(d) is None
-
-
-def test_discover_skills_walks_parents(tmp_path):
-    skills_dir = tmp_path / "a" / "b" / ".agents" / "skills"
-    _mk_skill(skills_dir, "deep-skill", "Deep.")
-    parent_skills = tmp_path / ".agents" / "skills"
-    _mk_skill(parent_skills, "top-skill", "Top.")
-    cwd = tmp_path / "a" / "b"
-    cwd.mkdir(parents=True, exist_ok=True)
-
-    skills = _discover_skills(cwd=cwd)
-    names = [s["name"] for s in skills]
-    assert "deep-skill" in names
-    assert "top-skill" in names
-    assert names.index("deep-skill") < names.index("top-skill")
-
-
-def test_discover_skills_deduplicates(tmp_path):
-    skills_dir = tmp_path / ".agents" / "skills"
-    _mk_skill(skills_dir, "only-once")
-    skills = _discover_skills(cwd=tmp_path)
-    assert sum(s["name"] == "only-once" for s in skills) == 1
-
-
-def test_skills_xml_empty(): assert _skills_xml([]) == ""
-
-
-def test_skills_xml_formats_correctly():
-    skills = [dict(name="my-skill", path="/tmp/my-skill", description="Does things.")]
-    xml = _skills_xml(skills)
-    assert "<skills>" in xml
-    assert 'name="my-skill"' in xml
-    assert 'path="/tmp/my-skill"' in xml
-    assert "Does things." in xml
-    assert "load_skill" in xml
-
-
-async def test_load_skill_reads_skill_md(tmp_path):
-    d = _mk_skill(tmp_path, "test-skill")
-    result = await load_skill(str(d))
-    assert "Instructions here." in result
-    assert "name: test-skill" in result
-
-
-async def test_load_skill_missing_returns_error(tmp_path):
-    result = await load_skill(str(tmp_path / "nope"))
-    assert "Error" in result
-
-async def test_eval_code_blocks_runs_eval_true():
-    shell,ext = mk_ext()
-    text = "# Intro\n\n```python\n#|eval: true\ndef foo(): return 42\n```\n\n```python\ndef bar(): return 99\n```"
-    await _eval_code_blocks(text, shell)
-    assert shell.user_ns["foo"]() == 42
-    assert "bar" not in shell.user_ns
-
-async def test_eval_code_blocks_space_after_pipe():
-    shell,ext = mk_ext()
-    text = "```python\n#| eval: true\nx = 7\n```"
-    await _eval_code_blocks(text, shell)
-    assert shell.user_ns["x"] == 7
-
-async def test_load_skill_evals_code_blocks(tmp_path):
-    d = tmp_path / "eval-skill"
-    d.mkdir()
-    text = "---\nname: eval-skill\ndescription: test\n---\n\n```python\n#|eval: true\ndef my_tool(): return 'loaded'\n```\n"
-    (d / "SKILL.md").write_text(text)
-    shell,ext = mk_ext()
-    await _eval_code_blocks(text, shell)
-    assert shell.user_ns["my_tool"]() == "loaded"
-
-
-async def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, monkeypatch):
-    skills_dir = tmp_path / ".agents" / "skills"
-    _mk_skill(skills_dir, "test-skill", "A test skill.")
-    monkeypatch.setattr(core, "_discover_skills", lambda: _discover_skills(cwd=tmp_path))
-    shell,ext = mk_ext()
-    assert len(ext.skills) == 1
-
-    await ext.run_prompt("hello")
-
-    chat = dummy_ai.instances[-1]
-    assert any("load_skill" in str(t) for t in chat.kwargs.get("tools", []))
-    assert "<skills>" in chat.kwargs["sp"]
-    assert "test-skill" in chat.kwargs["sp"]
-
-
 def test_frontmatter():
     from fastcore.xtras import frontmatter
     fm, body = frontmatter("---\nname: x\n---\nbody")
@@ -760,32 +625,10 @@ def test_allowed_tools_combined():
     text = "---\nallowed-tools: foo\n---\nuse &`bar` here"
     assert _allowed_tools(text) == {"foo", "bar"}
 
-def test_skill_allowed_tools(tmp_path):
-    d = tmp_path / "my-skill"
-    d.mkdir()
-    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nallowed-tools: analyze\n---\nuse &`fmt`\n")
-    s = _parse_skill(d)
-    assert set(s["tools"]) == {"analyze", "fmt"}
-
-def _mk_tool_response(fn, result_text):
-    return (f"<details class='tool-usage-details'>\n<summary>{fn}</summary>\n"
-        f"```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"{fn}\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>")
-
-def test_tool_results_with_allowed_tools():
-    assert "helper" in _tool_results(_mk_tool_response("load_skill", "---\\nallowed-tools: helper\\n---\\nbody"))
-
-def test_tool_results_only_from_load_skill():
-    assert "compute" in _tool_results(_mk_tool_response("load_skill", "---\\neval: true\\n---\\nuse &`compute`"))
-    assert _tool_results(_mk_tool_response("myfn", "---\\neval: true\\n---\\nuse &`compute`")) == set()
-
-def test_tool_results_non_load_skill_ignored():
-    assert _tool_results(_mk_tool_response("bash", "---\\nallowed-tools: helper\\n---\\nbody")) == set()
-
-def test_tool_refs_includes_notes_but_not_unloaded_skills():
-    skills = [dict(name="s", path="/s", description="", tools=["analyze"])]
+def test_tool_refs_includes_notes():
     notes = ["---\nallowed-tools: fmt\n---\nuse &`helper`"]
-    refs = _tool_refs("use &`main`", [], skills=skills, notes=notes)
-    assert refs == {"main", "load_skill", "fmt", "helper"}
+    refs = _tool_refs("use &`main`", [], notes=notes)
+    assert refs == {"main", "fmt", "helper"}
 
 def test_pyrun_auto_added_to_tools():
     pytest.importorskip("safepyrun")
@@ -817,21 +660,6 @@ def test_pyrun_not_added_when_absent():
     tools, bad = ext.resolve_tools("do something", [])
     assert not any(t.get("function", {}).get("name") == "pyrun" for t in tools)
 
-async def test_skill_tool_not_available_until_skill_loaded(dummy_ai, monkeypatch):
-    """A callable matching a skill's allowed-tools should not be sent to the API
-    unless the skill has actually been loaded via load_skill."""
-    def my_tool():
-        "A tool"
-        return "I exist"
-    shell,ext = mk_ext()
-    shell.user_ns["my_tool"] = my_tool
-    skills = [dict(name="s", path="/s", description="test", tools=["my_tool"], vars=[], shell_cmds=[])]
-    monkeypatch.setattr(ext, "skills", skills)
-    await ext.run_prompt("hello")
-    chat = dummy_ai.instances[-1]
-    tool_names = [t["function"]["name"] for t in (chat.kwargs.get("tools") or [])]
-    assert "my_tool" not in tool_names, "Skill tool should not be available before skill is loaded"
-
 async def test_note_tool_refs_in_resolve(dummy_ai):
     def helper():
         "A helper tool"
@@ -856,11 +684,6 @@ def test_var_names_empty_on_no_match():
 def test_var_refs_from_prompt_and_history():
     refs = _var_refs("use $`a`", [dict(prompt="use $`b`")])
     assert refs == {"a", "b"}
-
-def test_var_refs_from_skills():
-    skills = [dict(name="s", path="/s", description="", tools=[], vars=["x"])]
-    refs = _var_refs("use $`a`", [], skills=skills)
-    assert refs == {"a", "x"}
 
 def test_var_refs_from_notes():
     refs = _var_refs("", [], notes=["---\nexposed-vars: x y\n---\nuse $`z`"])
@@ -922,28 +745,6 @@ async def test_var_from_history_included(dummy_ai):
     prompt = chat.calls[0][0]
     assert '<variable name="x" type="int">10</variable>' in prompt
 
-def test_skill_vars_parsed(tmp_path):
-    d = tmp_path / "my-skill"
-    d.mkdir()
-    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nexposed-vars: data\n---\nuse $`count`\n")
-    s = _parse_skill(d)
-    assert set(s["vars"]) == {"data", "count"}
-
-async def test_skill_vars_in_prompt(dummy_ai, tmp_path, monkeypatch):
-    shell,ext = mk_ext()
-    shell.user_ns["data"] = [1, 2, 3]
-    d = tmp_path / "my-skill"
-    d.mkdir()
-    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nexposed-vars: data\n---\nbody")
-    monkeypatch.setattr(core, "_discover_skills", lambda: [_parse_skill(d)])
-    shell2, ext2 = mk_ext()
-    shell2.user_ns["data"] = [1, 2, 3]
-    await ext2.run_prompt("do something")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
-    assert '<variable name="data" type="list">[1, 2, 3]</variable>' in prompt
-
-
 ## Shell ref tests (!`cmd`)
 
 def test_shell_names_extracts_bang_backtick(): assert _shell_names("check !`uname -a` and !`ls`") == {"uname -a", "ls"}
@@ -953,11 +754,6 @@ def test_shell_names_empty_on_no_match(): assert _shell_names("no shell here") =
 def test_shell_refs_from_prompt_and_history():
     refs = _shell_refs("run !`echo hi`", [dict(prompt="run !`date`")])
     assert refs == {"echo hi", "date"}
-
-def test_shell_refs_from_skills():
-    skills = [dict(name="s", path="/s", description="", tools=[], vars=[], shell_cmds=["git status"])]
-    refs = _shell_refs("", [], skills=skills)
-    assert refs == {"git status"}
 
 def test_shell_refs_from_notes():
     refs = _shell_refs("", [], notes=["---\nshell-cmds: git status\n---\nrun !`ls`"])
@@ -985,13 +781,6 @@ async def test_shell_from_history_included(dummy_ai):
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<shell cmd="echo aaa">' in prompt
-
-def test_skill_shell_cmds_parsed(tmp_path):
-    d = tmp_path / "my-skill"
-    d.mkdir()
-    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nshell-cmds: git status\n---\nrun !`ls`\n")
-    s = _parse_skill(d)
-    assert set(s["shell_cmds"]) == {"git status", "ls"}
 
 def test_sysprompt_mentions_variables_and_shell():
     assert '$`' in DEFAULT_SYSTEM_PROMPT
