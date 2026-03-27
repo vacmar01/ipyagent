@@ -88,7 +88,6 @@ class FullResponse(str):
     def content(self): return str(self)
 
 
-
 def _pkg_version():
     try:
         from importlib.metadata import version
@@ -255,30 +254,32 @@ class _CodexAppServer:
             await self.notify("initialized")
             self.initialized = True
 
-    async def turn_stream(self, prompt, *, model=None, sp="", hist=None, tools=None, ns=None, think=None, search=None, output_schema=None):
+    async def start_thread(self, *, model=None, sp="", tools=None, search=None, ephemeral=False):
         await self.ensure_initialized()
-        async with self.turn_lock:
-            thread = await self.request("thread/start", self._thread_params(model=model, sp=sp, tools=tools, search=search))
-            thread_id = thread["thread"]["id"]
-            turn = await self.request("turn/start", self._turn_params(thread_id, prompt, hist=hist, think=think, output_schema=output_schema))
-            turn_id = turn["turn"]["id"]
-            async for chunk in self._consume_turn(thread_id, turn_id, ns or {}): yield chunk
-
-    def _thread_params(self, *, model=None, sp="", tools=None, search=None):
-        params = dict(cwd=os.getcwd(), approvalPolicy="never", sandbox="workspace-write", ephemeral=True, personality="pragmatic")
+        params = dict(cwd=os.getcwd(), approvalPolicy="never", sandbox="workspace-write", ephemeral=ephemeral, personality="pragmatic")
         if model: params["model"] = model
         if sp: params["developerInstructions"] = sp + _HIST_SP
         if (dtools := _dynamic_tools(tools)): params["dynamicTools"] = dtools
         if (cfg := _search_cfg(search)): params["config"] = cfg
-        return params
+        result = await self.request("thread/start", params)
+        return result["thread"]["id"]
 
-    def _turn_params(self, thread_id, prompt, *, hist=None, think=None, output_schema=None):
-        text = _history_xml(hist) + prompt
-        params = dict(threadId=thread_id, input=[dict(type="text", text=text, text_elements=[])], cwd=os.getcwd(),
-            approvalPolicy="never", personality="pragmatic", summary="detailed")
-        if (effort := _effort_level(think)): params["effort"] = effort
-        if output_schema is not None: params["outputSchema"] = output_schema
-        return params
+    async def resume_thread(self, thread_id, *, sp=""):
+        await self.ensure_initialized()
+        params = dict(threadId=thread_id, cwd=os.getcwd(), approvalPolicy="never", sandbox="workspace-write", personality="pragmatic")
+        if sp: params["developerInstructions"] = sp + _HIST_SP
+        result = await self.request("thread/resume", params)
+        return result["thread"]["id"]
+
+    async def turn_stream(self, thread_id, prompt, *, ns=None, think=None, output_schema=None):
+        async with self.turn_lock:
+            params = dict(threadId=thread_id, input=[dict(type="text", text=prompt, text_elements=[])], cwd=os.getcwd(),
+                approvalPolicy="never", personality="pragmatic", summary="detailed")
+            if (effort := _effort_level(think)): params["effort"] = effort
+            if output_schema is not None: params["outputSchema"] = output_schema
+            turn = await self.request("turn/start", params)
+            turn_id = turn["turn"]["id"]
+            async for chunk in self._consume_turn(thread_id, turn_id, ns or {}): yield chunk
 
     async def _consume_turn(self, thread_id, turn_id, ns):
         agent_seen,cmd_output,cmd_items = set(),defaultdict(str),{}
@@ -373,12 +374,14 @@ def get_codex_client():
 
 
 class AsyncChat:
-    def __init__(self, model=None, sp="", ns=None, hist=None, tools=None):
-        self.model,self.sp,self.ns,self.hist,self.tools = model,sp,ns or {},hist or [],tools or []
+    "Ephemeral one-shot chat for completions."
+    def __init__(self, model=None, sp=""):
+        self.model,self.sp = model,sp
 
-    async def __call__(self, prompt, stream=False, think=None, search=None, output_schema=None):
-        stream_it = get_codex_client().turn_stream(prompt, model=self.model, sp=self.sp, hist=self.hist, tools=self.tools, ns=self.ns,
-            think=think, search=search, output_schema=output_schema)
-        if stream: return stream_it
-        text = "".join([o async for o in stream_it])
+    async def __call__(self, prompt, think=None):
+        client = get_codex_client()
+        thread_id = await client.start_thread(model=self.model, sp=self.sp, ephemeral=True)
+        text = ""
+        async for chunk in client.turn_stream(thread_id, prompt, think=think):
+            if isinstance(chunk, str): text += chunk
         return FullResponse(text)

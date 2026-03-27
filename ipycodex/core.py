@@ -9,7 +9,7 @@ from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
-from .codex_client import AsyncChat,AsyncStreamFormatter
+from .codex_client import AsyncChat,AsyncStreamFormatter,get_codex_client,_history_xml
 from rich.console import Console
 from rich.file_proxy import FileProxy
 from rich.live import Live
@@ -48,18 +48,15 @@ Earlier user turns in the chat history may also contain their own `<context>` bl
 You can respond in Markdown. Your final visible output in terminal IPython will be rendered with Rich, so normal Markdown formatting, fenced code blocks, lists, and tables are appropriate when useful.
 
 The user can attach context to their prompt using backtick references:
-- `&`name`` exposes a callable from the IPython namespace as a dynamic tool you can call
 - `$`name`` exposes a variable's current value, shown as `<variable name="..." type="...">value</variable>` above the user's request
 - `!`cmd`` runs a shell command and includes its output, shown as `<shell cmd="...">output</shell>` above the user's request
 
 You can also use Codex app-server's built-in shell and file actions for normal workspace operations. Those server-side actions can inspect and modify files in the working directory sandbox, but they cannot access the live IPython namespace.
 
-Use tools when they will materially improve correctness or completeness; otherwise answer directly. Prefer server-side shell and file actions for repository work. Prefer dynamic tools such as `pyrun`, `ex`, `sed`, and user-exposed `&`name`` callables when you need live Python state, the active IPython namespace, or an explicitly exposed helper.
+Use tools when they will materially improve correctness or completeness; otherwise answer directly. Prefer server-side shell and file actions for repository work. Use `pyrun` and `bash` when you need live Python state or the active IPython namespace. The user can register additional tools from the IPython namespace via `%ipycodex tool <name>`.
 
-You have these key dynamic tools available:
+You have these dynamic tools available by default:
 - `pyrun(code)`: Execute Python code in a sandboxed environment with access to the user's namespace. Use `pyrun('dir(...)')` to discover what's available on a module, object, or class. Use `pyrun('doc(...)')` to get its signature and docstring. Run `pyrun('doc(pyrun)')` to learn what's available in the sandbox.
-- `ex(path, cmds)`: Run ex editor commands on a file. Great for reading files, search/replace, indent/dedent, `g/pat/cmd`, and surgical multi-line edits without rewriting whole files.
-- `sed(path, cmd)`: Run focused `sed` transforms when that's simpler than `ex`.
 - `bash(cmd)`: Run the local allowlisted shell helper when you specifically need it from the user's namespace.
 
 Only dynamic tools can see live IPython objects. Server-side shell and file actions cannot.
@@ -72,7 +69,7 @@ LAST_RESPONSE = "_ai_last_response"
 EXTENSION_NS = "_ipycodex"
 EXTENSION_ATTR = "_ipycodex_extension"
 RESET_LINE_NS = "_ipycodex_reset_line"
-PROMPTS_TABLE = "ai_prompts"
+PROMPTS_TABLE = "codex_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
 _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,16 +77,26 @@ _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
     prompt TEXT NOT NULL,
     response TEXT NOT NULL,
     history_line INTEGER NOT NULL DEFAULT 0)"""
+_TOOLS_SQL = """CREATE TABLE IF NOT EXISTS codex_tools (
+    session INTEGER NOT NULL,
+    toolname TEXT NOT NULL,
+    PRIMARY KEY (session, toolname))"""
+_SESSIONS_SQL = """CREATE TABLE IF NOT EXISTS codex_sessions (
+    session INTEGER PRIMARY KEY,
+    thread_id TEXT NOT NULL)"""
 
-def _ensure_prompts_table(db):
+def _ensure_codex_tables(db):
     if db is None: return
     with db:
         db.execute(_PROMPTS_SQL)
         cols = [o[1] for o in db.execute(f"PRAGMA table_info({PROMPTS_TABLE})")]
-        if cols != PROMPTS_COLS:
+        if cols and cols != PROMPTS_COLS:
             db.execute(f"DROP TABLE {PROMPTS_TABLE}")
             db.execute(_PROMPTS_SQL)
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
+        db.execute(_TOOLS_SQL)
+        db.execute(_SESSIONS_SQL)
+
 CONFIG_DIR = xdg_config_home()/"ipycodex"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
@@ -101,7 +108,6 @@ create_extension CONFIG_PATH SYSP_PATH LOG_PATH is_dot_prompt load_ipython_exten
 prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".split()
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
-_tool_re = re.compile(r"&`(\w+)`")
 _var_re = re.compile(r"\$`(\w+)`")
 _shell_re = re.compile(r"(?<![\w`])!`([^`]+)`")
 _status_attrs = "model completion_model think search code_theme log_exact".split()
@@ -158,26 +164,6 @@ def _is_note(source):
 
 
 def _note_str(source): return ast.parse(source).body[0].value.value
-
-
-def _tool_names(text: str) -> set[str]: return set(_tool_re.findall(text or ""))
-
-
-def _allowed_tools(text):
-    "Extract tool names from frontmatter allowed-tools and &`tool` mentions."
-    fm, body = frontmatter(text)
-    names = _tool_names(text)
-    if fm:
-        at = fm.get('allowed-tools', '')
-        if at: names |= set(str(at).split())
-    return names
-
-
-def _tool_refs(prompt, hist, notes=None):
-    names = _tool_names(prompt)
-    for o in hist: names |= _tool_names(o["prompt"])
-    for n in (notes or []): names |= _allowed_tools(n)
-    return names
 
 
 def _var_names(text: str) -> set[str]: return set(_var_re.findall(text or ""))
@@ -404,7 +390,7 @@ def _git_repo_root(path):
     return None
 
 _LIST_SQL = """SELECT s.session, s.start, s.end, s.num_cmds, s.remark,
-    (SELECT prompt FROM ai_prompts WHERE session=s.session ORDER BY id DESC LIMIT 1)
+    (SELECT prompt FROM codex_prompts WHERE session=s.session ORDER BY id DESC LIMIT 1)
     FROM sessions s WHERE s.remark{w} ORDER BY s.session DESC LIMIT 20"""
 
 def _list_sessions(db, cwd):
@@ -468,6 +454,8 @@ class IPyAIExtension:
         self.code_theme = str(code_theme or cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
+        self._thread_id = None
+        self._tools_dirty = False
         from safecmd import bash, ex, sed
         from safepyrun import doc
         shell.user_ns.setdefault("bash", bash)
@@ -489,11 +477,11 @@ class IPyAIExtension:
         hm = self.history_manager
         return None if hm is None else hm.db
 
-    def ensure_prompt_table(self): _ensure_prompts_table(self.db)
+    def ensure_tables(self): _ensure_codex_tables(self.db)
 
     def prompt_records(self, session: int | None=None) -> list:
         if self.db is None: return []
-        self.ensure_prompt_table()
+        self.ensure_tables()
         session = self.session_number if session is None else session
         cur = self.db.execute(f"SELECT id, prompt, response, history_line FROM {PROMPTS_TABLE} WHERE session=? ORDER BY id", (session,))
         return cur.fetchall()
@@ -535,32 +523,88 @@ class IPyAIExtension:
         return _prompt_template.format(context=ctx, prompt=prompt.strip())
 
     def dialog_history(self) -> list:
-        hist,res = [],[]
+        "Build serialized conversation history for thread migration."
+        hist = []
         prev_line = self.reset_line
         for pid,prompt,response,history_line in self.prompt_records():
             if not response.strip(): response = "<system>user interrupted</system>"
             hist += [self.format_prompt(prompt, prev_line+1, history_line), response]
-            res.append(dict(id=pid, prompt=prompt, response=response, history_line=history_line))
             prev_line = history_line
-        return hist,res
+        return hist
 
     def note_strings(self, start, stop):
         "Return note string values from code history in range."
         return [_note_str(src) for _,_,pair in self.code_history(start, stop) if (src := pair[0]) and _is_note(src)]
 
-    def resolve_tools(self, prompt, hist, notes=None):
+    def _get_tool_names(self):
+        "Get tool names: auto-tools + codex_tools table entries."
         ns = self.shell.user_ns
-        check_refs = _tool_refs(prompt, hist, notes=notes)
-        all_refs = set(check_refs)
-        for t in ("pyrun", "bash", "ex", "sed"):
-            if callable(ns.get(t)): all_refs.add(t)
-        tools = [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(all_refs) if callable(ns.get(o))]
-        bad = sorted(o for o in check_refs if o not in ns or not callable(ns.get(o)))
-        return tools, bad
+        names = set()
+        for t in ("pyrun", "bash"):
+            if callable(ns.get(t)): names.add(t)
+        if self.db:
+            for row in self.db.execute("SELECT toolname FROM codex_tools WHERE session=?", (self.session_number,)):
+                if callable(ns.get(row[0])): names.add(row[0])
+        return names
+
+    def _get_tools(self):
+        "Get tool schemas for the current tool set."
+        ns = self.shell.user_ns
+        return [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(self._get_tool_names()) if callable(ns.get(o))]
+
+    async def _ensure_thread(self):
+        "Start or resume the codex thread for this session."
+        if self._thread_id and not self._tools_dirty: return
+        self.ensure_tables()
+        client = get_codex_client()
+        if self._tools_dirty and self._thread_id:
+            await self._migrate_thread()
+            return
+        if self.db:
+            row = self.db.execute("SELECT thread_id FROM codex_sessions WHERE session=?", (self.session_number,)).fetchone()
+            if row:
+                try:
+                    self._thread_id = await client.resume_thread(row[0], sp=self.system_prompt)
+                    return
+                except Exception: pass
+        tools = self._get_tools()
+        self._thread_id = await client.start_thread(model=self.model, sp=self.system_prompt, tools=tools, search=self.search)
+        if self.db:
+            with self.db:
+                self.db.execute("INSERT OR REPLACE INTO codex_sessions (session, thread_id) VALUES (?,?)",
+                    (self.session_number, self._thread_id))
+
+    async def _migrate_thread(self):
+        "Start a new thread with updated tools, replaying conversation history."
+        hist = self.dialog_history()
+        tools = self._get_tools()
+        client = get_codex_client()
+        new_id = await client.start_thread(model=self.model, sp=self.system_prompt, tools=tools, search=self.search)
+        if hist:
+            migration_prompt = (_history_xml(hist)
+                + "The above conversation has been migrated to this new thread. Respond with 'ok'.")
+            async for _ in client.turn_stream(new_id, migration_prompt, ns=self.shell.user_ns, think="l"): pass
+        self._thread_id = new_id
+        self._tools_dirty = False
+        if self.db:
+            with self.db:
+                self.db.execute("INSERT OR REPLACE INTO codex_sessions (session, thread_id) VALUES (?,?)",
+                    (self.session_number, new_id))
+
+    def _register_tool(self, name):
+        "Register a tool from user_ns for the current session."
+        ns = self.shell.user_ns
+        if name not in ns: raise NameError(f"{name!r} is not defined")
+        if not callable(ns[name]): raise TypeError(f"{name!r} is not callable")
+        if self.db:
+            with self.db:
+                self.db.execute("INSERT OR IGNORE INTO codex_tools (session, toolname) VALUES (?,?)",
+                    (self.session_number, name))
+        self._tools_dirty = True
 
     def save_prompt(self, prompt: str, response: str, history_line: int):
         if self.db is None: return
-        self.ensure_prompt_table()
+        self.ensure_tables()
         with self.db:
             self.db.execute(f"INSERT INTO {PROMPTS_TABLE} (session, prompt, response, history_line) VALUES (?, ?, ?, ?)",
                 (self.session_number, prompt, response, history_line))
@@ -612,18 +656,17 @@ class IPyAIExtension:
 
     def reset_session_history(self) -> int:
         if self.db is None: return 0
-        self.ensure_prompt_table()
+        self.ensure_tables()
         with self.db: cur = self.db.execute(f"DELETE FROM {PROMPTS_TABLE} WHERE session=?", (self.session_number,))
         self.shell.user_ns.pop(LAST_PROMPT, None)
         self.shell.user_ns.pop(LAST_RESPONSE, None)
         self.shell.user_ns[RESET_LINE_NS] = self.current_prompt_line()
+        self._thread_id = None
         return cur.rowcount or 0
 
     def _register_keybindings(self):
         pt_app = getattr(self.shell, 'pt_app', None)
         if pt_app is None: return
-        # Wrap existing auto-suggest so AI completions survive partial accepts (M-f)
-        # Patch existing auto-suggest so AI completions survive partial accepts (M-f)
         auto_suggest = pt_app.auto_suggest
         if auto_suggest:
             auto_suggest._ai_full_text = None
@@ -655,17 +698,14 @@ class IPyAIExtension:
             cycle['idx'] = (cycle['idx'] + delta) % len(blocks)
             from prompt_toolkit.document import Document
             event.current_buffer.document = Document(blocks[cycle['idx']])
-        # prompt_toolkit swaps A/B for modifier-4 (Alt+Shift) arrows
-        @pt_app.key_bindings.add('escape', 's-up')   # physical Alt-Shift-Down
+        @pt_app.key_bindings.add('escape', 's-up')
         def _cycle_down(event): _cycle(event, 1)
-        @pt_app.key_bindings.add('escape', 's-down')  # physical Alt-Shift-Up
+        @pt_app.key_bindings.add('escape', 's-down')
         def _cycle_up(event): _cycle(event, -1)
-        # Alt-Up/Down: jump through complete history entries (skips line-by-line)
         @pt_app.key_bindings.add('escape', 'up')
         def _hist_back(event): event.current_buffer.history_backward()
         @pt_app.key_bindings.add('escape', 'down')
         def _hist_fwd(event): event.current_buffer.history_forward()
-        # Alt-.: AI completion via haiku
         @pt_app.key_bindings.add('escape', '.')
         def _ai_suggest(event):
             buf = event.current_buffer
@@ -682,7 +722,6 @@ class IPyAIExtension:
                         app.invalidate()
                 except Exception: pass
             app.create_background_task(_do_complete())
-        # Alt-P: toggle prompt mode
         @pt_app.key_bindings.add('escape', 'p')
         def _toggle_prompt(event):
             self._toggle_prompt_mode()
@@ -719,7 +758,7 @@ class IPyAIExtension:
 
     def load(self):
         if self.loaded: return self
-        self.ensure_prompt_table()
+        self.ensure_tables()
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if self.prompt_mode:
             if transform_prompt_mode not in cts: cts.insert(0, transform_prompt_mode)
@@ -780,6 +819,7 @@ class IPyAIExtension:
     def _show_help(self):
         cmds = [("(no args)", "Show current settings"), ("help", "Show this help"), ("model <name>", "Set model"), ("think <l|m|h>",
             "Set thinking level"), ("search <l|m|h>", "Set search level"), ("prompt", "Toggle prompt mode"),
+            ("tool <name>", "Register a tool from user_ns"), ("tools", "List registered tools"),
             ("save <file>", "Save session to .ipynb"), ("load <file>", "Load session from .ipynb"),
             ("reset", "Clear AI prompts from current session"), ("sessions", "List previous sessions")]
         print("Usage: %ipycodex <command>\n")
@@ -797,6 +837,9 @@ class IPyAIExtension:
         if line == "reset":
             n = self.reset_session_history()
             return print(f"Deleted {n} AI prompts from session {self.session_number}.")
+        if line == "tools":
+            names = sorted(self._get_tool_names())
+            return print(", ".join(names) if names else "No tools registered.")
         if line == "sessions":
             rows = _list_sessions(self.db, os.getcwd())
             if not rows: return print("No sessions found for this directory.")
@@ -805,6 +848,12 @@ class IPyAIExtension:
             return
         cmd,_,arg = line.partition(" ")
         clean = arg.strip()
+        if cmd == "tool":
+            if not clean: return print("Usage: %ipycodex tool <name>")
+            try:
+                self._register_tool(clean)
+                return print(f"Tool '{clean}' registered. Thread will be migrated on next prompt.")
+            except (NameError, TypeError) as e: return print(str(e))
         if cmd == "save":
             if not clean: return print("Usage: %ipycodex save <filename>")
             path, ncode, nprompt = self.save_notebook(clean)
@@ -826,32 +875,31 @@ class IPyAIExtension:
     async def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
         if not prompt.strip(): return None
+        await self._ensure_thread()
         history_line = self.current_prompt_line()
-        hist,recs = self.dialog_history()
-        # Collect notes for tool resolution
+        records = self.prompt_records()
+        recs = [dict(prompt=p, history_line=hl) for _,p,_,hl in records]
+        # Collect notes for var/shell refs
         notes = []
         prev_line = self.reset_line
         for o in recs:
             notes += self.note_strings(prev_line+1, o["history_line"])
             prev_line = o["history_line"]
         notes += self.note_strings(self.last_prompt_line()+1, history_line)
-        tools, bad_tools = self.resolve_tools(prompt, recs, notes=notes)
         ns = self.shell.user_ns
         var_names = _var_refs(prompt, recs, notes=notes)
         missing_vars = sorted(n for n in var_names if n not in ns)
-        all_missing = sorted(set(bad_tools + missing_vars))
         var_xml = _format_var_xml(var_names, ns)
         shell_cmds = _shell_refs(prompt, recs, notes=notes)
         shell_xml = _run_shell_refs(shell_cmds)
         warnings = ""
-        if all_missing: warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(all_missing)}") + "\n"
+        if missing_vars: warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(missing_vars)}") + "\n"
         prefix = var_xml + shell_xml
         full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
         full_prompt = warnings + prefix + full_prompt
         self.shell.user_ns[LAST_PROMPT] = prompt
-        sp = self.system_prompt
-        chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
-        stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
+        client = get_codex_client()
+        stream = client.turn_stream(self._thread_id, full_prompt, ns=ns, think=self.think)
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         loop.add_signal_handler(signal.SIGINT, task.cancel)
@@ -875,7 +923,7 @@ class IPyAIExtension:
 def create_extension(shell=None, resume=None, load=None, prompt_mode=False, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
-    _ensure_prompts_table(shell.history_manager.db)
+    _ensure_codex_tables(shell.history_manager.db)
     if resume is not None:
         if resume == -1:
             rows = _list_sessions(shell.history_manager.db, os.getcwd())

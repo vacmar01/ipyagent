@@ -6,8 +6,12 @@ import ipycodex.codex_client as cc
 class FakeClient:
     def __init__(self): self.calls = []
 
-    async def turn_stream(self, prompt, **kwargs):
-        self.calls.append((prompt, kwargs))
+    async def start_thread(self, **kwargs):
+        self.calls.append(("start_thread", kwargs))
+        return "thread_1"
+
+    async def turn_stream(self, thread_id, prompt, **kwargs):
+        self.calls.append(("turn_stream", thread_id, prompt, kwargs))
         yield "first "
         yield "second"
 
@@ -16,23 +20,18 @@ async def _aiter(*items):
     for o in items: yield o
 
 
-async def test_asyncchat_collects_stream(monkeypatch):
+async def test_asyncchat_ephemeral(monkeypatch):
     fake = FakeClient()
     monkeypatch.setattr(cc, "get_codex_client", lambda: fake)
-    tools = [dict(type="function", function=dict(name="demo", description="Demo", parameters=dict(type="object")))]
-    chat = cc.AsyncChat(model="gpt-5.4", sp="system", ns=dict(x=1), hist=["u1", "a1"], tools=tools)
+    chat = cc.AsyncChat(model="gpt-5.4", sp="system")
 
-    res = await chat("prompt", think="m", search="h")
+    res = await chat("prompt", think="m")
 
     assert str(res) == "first second"
-    prompt,kwargs = fake.calls[0]
-    assert prompt == "prompt"
-    assert kwargs["model"] == "gpt-5.4"
-    assert kwargs["sp"] == "system"
-    assert kwargs["hist"] == ["u1", "a1"]
-    assert kwargs["tools"] == tools
-    assert kwargs["think"] == "m"
-    assert kwargs["search"] == "h"
+    assert fake.calls[0] == ("start_thread", dict(model="gpt-5.4", sp="system", ephemeral=True))
+    assert fake.calls[1][1] == "thread_1"
+    assert fake.calls[1][2] == "prompt"
+    assert fake.calls[1][3]["think"] == "m"
 
 
 def test_dynamic_tools_maps_openai_style_schema():

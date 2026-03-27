@@ -6,9 +6,9 @@ from IPython.core.inputtransformer2 import TransformerManager
 
 import ipycodex.core as core
 from ipycodex.core import (DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK, EXTENSION_NS,
-    IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS, _allowed_tools,
+    IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     _extract_code_blocks, _format_var_xml, _git_repo_root, _list_sessions, _shell_names, _shell_refs,
-    _thinking_to_blockquote, _tool_refs, _run_shell_refs, _var_names, _var_refs, astream_to_stdout,
+    _thinking_to_blockquote, _run_shell_refs, _var_names, _var_refs, astream_to_stdout,
     prompt_from_lines, resume_session, transform_dots, transform_prompt_mode)
 
 class DummyAsyncFormatter:
@@ -54,19 +54,25 @@ class DummyLive:
     def __exit__(self, exc_type, exc, tb): self.kwargs["console"].print(self.renderables[-1])
     def update(self, renderable, refresh=False): self.renderables.append(renderable)
 
-class DummyAsyncChat:
-    instances = []
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self.calls = []
-        type(self).instances.append(self)
+class DummyCodexClient:
+    def __init__(self):
+        self.threads = {}
+        self.turns = []
+        self._next_thread_id = 0
 
-    async def __call__(self, prompt, stream=False, **kwargs):
-        self.calls.append((prompt, stream, kwargs))
-        async def _stream():
-            yield "first "
-            yield "second"
-        return _stream()
+    async def start_thread(self, *, model=None, sp="", tools=None, search=None, ephemeral=False):
+        self._next_thread_id += 1
+        tid = f"thread_{self._next_thread_id}"
+        self.threads[tid] = dict(model=model, sp=sp, tools=tools, search=search, ephemeral=ephemeral)
+        return tid
+
+    async def resume_thread(self, thread_id, *, sp=""):
+        return thread_id
+
+    async def turn_stream(self, thread_id, prompt, *, ns=None, think=None, output_schema=None):
+        self.turns.append(dict(thread_id=thread_id, prompt=prompt, ns=ns, think=think))
+        yield "first "
+        yield "second"
 
 class DummyHistory:
     def __init__(self, session_number=1):
@@ -127,13 +133,13 @@ def _config_paths(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def dummy_ai(monkeypatch):
-    DummyAsyncChat.instances = []
-    monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
+def dummy_codex(monkeypatch):
+    client = DummyCodexClient()
+    monkeypatch.setattr(core, "get_codex_client", lambda: client)
 
     async def _fake_astream_to_stdout(stream, **kwargs): return "".join([o async for o in stream])
     monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
-    return DummyAsyncChat
+    return client
 
 
 def test_prompt_from_lines_drops_continuation_backslashes():
@@ -219,9 +225,7 @@ def test_astream_to_stdout_tty_uses_formatter_display_and_final_text():
     assert out.getvalue() == "RICH:final answer"
 
 
-
-
-async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
+async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_codex):
     shell,ext = mk_ext()
     ext.load()
     assert shell.input_transformer_manager.cleanup_transforms == [transform_dots]
@@ -230,30 +234,22 @@ async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
 
     await ext.run_prompt("tell me something")
 
-    assert dummy_ai.instances[-1].kwargs["hist"] == []
-    assert dummy_ai.instances[-1].calls == [(
-        "<user-request>tell me something</user-request>",
-        True,
-        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
-    )]
-    assert dummy_ai.instances[-1].kwargs["model"] == ext.model
-    assert dummy_ai.instances[-1].kwargs["sp"] == DEFAULT_SYSTEM_PROMPT
+    assert len(dummy_codex.turns) == 1
+    assert dummy_codex.turns[0]["prompt"] == "<user-request>tell me something</user-request>"
+    assert dummy_codex.turns[0]["think"] == DEFAULT_THINK
     assert shell.user_ns[LAST_PROMPT] == "tell me something"
     assert shell.user_ns[LAST_RESPONSE] == "first second"
     assert ext.prompt_rows() == [("tell me something", "first second")]
     assert ext.prompt_records()[0][3] == 1
 
 
-
-async def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatch):
+async def test_run_prompt_suppresses_ipython_output_history_while_streaming(dummy_codex, monkeypatch):
     shell,ext = mk_ext(load=False)
     seen = []
 
     async def _fake_astream_to_stdout(stream, **kwargs):
         seen.append(shell.display_pub._is_publishing)
         return "".join([o async for o in stream])
-
-    monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
     monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
 
     await ext.run_prompt("tell me something")
@@ -262,14 +258,12 @@ async def test_run_prompt_suppresses_ipython_output_history_while_streaming(monk
     assert shell.display_pub._is_publishing is False
 
 
-async def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch):
+async def test_run_prompt_stores_cleaned_response_for_output_history(dummy_codex, monkeypatch):
     shell,ext = mk_ext(load=False)
-    # Simulate ipythonng extension
     ng = SimpleNamespace(_pty_output=None)
     shell._ipythonng_extension = ng
 
     async def _fake_astream_to_stdout(stream, **kwargs): return "<thinking>\nhmm\n</thinking>\n\nHello world"
-    monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
     monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
 
     await ext.run_prompt("test")
@@ -280,17 +274,27 @@ async def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch
 def test_unexpected_prompt_table_schema_is_recreated():
     shell = DummyShell()
     with shell.history_manager.db:
-        shell.history_manager.db.execute("CREATE TABLE ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER NOT NULL, "
+        shell.history_manager.db.execute("CREATE TABLE codex_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER NOT NULL, "
             "prompt TEXT NOT NULL, response TEXT NOT NULL, history_line INTEGER NOT NULL DEFAULT 0, "
             "prompt_line INTEGER NOT NULL DEFAULT 0)")
-        shell.history_manager.db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line, prompt_line) VALUES "
+        shell.history_manager.db.execute("INSERT INTO codex_prompts (session, prompt, response, history_line, prompt_line) VALUES "
             "(1, 'p', 'r', 1, 2)")
 
     ext = IPyAIExtension(shell=shell)
 
     assert ext.prompt_records() == []
-    cols = [o[1] for o in shell.history_manager.db.execute("PRAGMA table_info(ai_prompts)")]
+    cols = [o[1] for o in shell.history_manager.db.execute("PRAGMA table_info(codex_prompts)")]
     assert cols == ["id", "session", "prompt", "response", "history_line"]
+
+
+def test_codex_tables_are_created():
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell).load()
+    db = shell.history_manager.db
+    tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    assert "codex_prompts" in tables
+    assert "codex_tools" in tables
+    assert "codex_sessions" in tables
 
 
 def test_config_file_is_created_and_loaded():
@@ -316,7 +320,7 @@ def test_existing_sysp_file_is_loaded():
     assert ext.system_prompt == "custom sysp"
 
 
-async def test_config_values_drive_model_think_and_search(dummy_ai):
+async def test_config_values_drive_model_think_and_search(dummy_codex):
     core.CONFIG_PATH.write_text(json.dumps(dict(model="cfg-model", think="m", search="h", log_exact=True)))
     shell,ext = mk_ext()
 
@@ -326,11 +330,7 @@ async def test_config_values_drive_model_think_and_search(dummy_ai):
     assert ext.think == "m"
     assert ext.search == "h"
     assert ext.log_exact is True
-    assert dummy_ai.instances[-1].calls == [(
-        "<user-request>tell me something</user-request>",
-        True,
-        dict(search="h", think="m"),
-    )]
+    assert dummy_codex.turns[0]["think"] == "m"
 
 
 def test_handle_line_can_report_and_set_model(capsys):
@@ -364,63 +364,27 @@ def test_handle_line_can_report_and_set_model(capsys):
     assert capsys.readouterr().out == "self.log_exact=False\n"
 
 
-async def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
+async def test_second_prompt_stores_both_in_codex_prompts(dummy_codex):
     shell,ext = mk_ext()
 
     await ext.run_prompt("first prompt")
     shell.execution_count = 3
     await ext.run_prompt("second prompt")
 
-    assert dummy_ai.instances[1].kwargs["hist"] == [
-        "<user-request>first prompt</user-request>",
-        "first second"]
     assert ext.prompt_rows() == [
         ("first prompt", "first second"),
         ("second prompt", "first second")]
+    assert len(dummy_codex.turns) == 2
 
 
-async def test_interrupted_prompt_with_no_output_has_valid_history(dummy_ai):
-    """When a prompt is interrupted before any output, the saved response should
-    still produce a valid assistant message in the history for the next prompt."""
+async def test_persistent_thread_reused_across_prompts(dummy_codex):
     shell,ext = mk_ext()
 
-    # Simulate an interrupted prompt that produced no output
-    ext.save_prompt("interrupted prompt", "", 1)
-    shell.execution_count = 3
-    await ext.run_prompt("follow up")
+    await ext.run_prompt("first prompt")
+    await ext.run_prompt("second prompt")
 
-    # The history sent to the model should have a non-empty assistant message
-    hist = dummy_ai.instances[0].kwargs["hist"]
-    assert len(hist) == 2  # user + assistant from interrupted prompt
-    # Assistant message (the interrupted response) should not be empty
-    assert hist[1] != "", "Empty assistant response in history causes prefill errors"
-
-
-async def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
-    shell,ext = mk_ext()
-    shell.history_manager.add(1, "print('a')", "a")
-    shell.history_manager.add(2, "print(1)", "1")
-    shell.history_manager.add(3, "1+1", "2")
-    shell.execution_count = 5
-
-    await ext.run_prompt("What code history do you see in my session exactly?")
-
-    shell.history_manager.add(5, "from IPython.display import HTML,Markdown,Pretty,display")
-    shell.history_manager.add(6, "Markdown('A **b** *c*')", "A **b** *c*")
-    shell.execution_count = 8
-
-    await ext.run_prompt("Do you see the earlier prints etc from the first prompt?")
-
-    assert dummy_ai.instances[1].kwargs["hist"] == [
-        "<context><code>print('a')</code><output>a</output><code>print(1)</code><output>1</output><code>1+1</code><output>2</output></context>\n"
-        "<user-request>What code history do you see in my session exactly?</user-request>",
-        "first second"]
-    assert dummy_ai.instances[1].calls == [(
-        "<context><code>from IPython.display import HTML,Markdown,Pretty,display</code><code>Markdown('A **b** *c*')</code>"
-        "<output>A **b** *c*</output></context>\n<user-request>Do you see the earlier prints etc from the first prompt?</user-request>",
-        True,
-        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
-    )]
+    assert len(dummy_codex.threads) == 1
+    assert dummy_codex.turns[0]["thread_id"] == dummy_codex.turns[1]["thread_id"]
 
 
 def test_reset_only_deletes_current_session_history(capsys):
@@ -439,33 +403,66 @@ def test_reset_only_deletes_current_session_history(capsys):
     assert shell.user_ns[RESET_LINE_NS] == 7
 
 
-def test_tools_resolve_from_ampersand_backticks():
+def test_register_tool(capsys):
+    shell,ext = mk_ext()
     def demo():
         "Demo tool."
         return "ok"
-
-    shell = DummyShell()
     shell.user_ns["demo"] = demo
-    ext = IPyAIExtension(shell=shell).load()
 
-    tools, bad = ext.resolve_tools("please call &`demo` now", [])
-    assert any(t["function"]["name"] == "demo" for t in tools)
-    assert bad == []
+    ext.handle_line("tool demo")
+    assert "registered" in capsys.readouterr().out
+    assert ext._tools_dirty is True
+    assert "demo" in ext._get_tool_names()
 
 
-def test_tools_resolve_callable_objects_by_namespace_name():
-    class Demo:
-        def __call__(self):
-            "Demo tool."
-            return "ok"
+def test_register_tool_missing_raises(capsys):
+    _,ext = mk_ext()
+    ext.handle_line("tool nonexistent")
+    assert "not defined" in capsys.readouterr().out
 
+
+def test_register_tool_noncallable_raises(capsys):
+    shell,ext = mk_ext()
+    shell.user_ns["x"] = 42
+    ext.handle_line("tool x")
+    assert "not callable" in capsys.readouterr().out
+
+
+def test_get_tools_includes_auto_and_registered():
+    pytest.importorskip("safepyrun")
+    from safepyrun import RunPython
     shell = DummyShell()
-    shell.user_ns["demo"] = Demo()
+    shell.user_ns["pyrun"] = RunPython(g=shell.user_ns)
     ext = IPyAIExtension(shell=shell).load()
+    names = ext._get_tool_names()
+    assert "pyrun" in names
+    assert "bash" in names
 
-    tools, bad = ext.resolve_tools("please call &`demo` now", [])
-    assert any(t["function"]["name"] == "demo" for t in tools)
-    assert bad == []
+
+def test_handle_line_tools_lists_tools(capsys):
+    shell,ext = mk_ext()
+    ext.handle_line("tools")
+    out = capsys.readouterr().out
+    assert "bash" in out or "No tools" in out
+
+
+async def test_tool_migration_creates_new_thread(dummy_codex):
+    shell,ext = mk_ext()
+    def demo():
+        "Demo tool."
+        return "ok"
+    shell.user_ns["demo"] = demo
+
+    await ext.run_prompt("first prompt")
+    assert len(dummy_codex.threads) == 1
+    first_thread = dummy_codex.turns[0]["thread_id"]
+
+    ext._register_tool("demo")
+    await ext.run_prompt("second prompt after tool added")
+
+    assert len(dummy_codex.threads) == 2
+    assert dummy_codex.turns[-1]["thread_id"] != first_thread
 
 
 def test_context_xml_includes_code_and_outputs_since_last_prompt():
@@ -549,7 +546,8 @@ def test_load_notebook_replays_code_and_restores_prompts(tmp_path):
     assert shell.ran_cells == [("import math", True), ("x = 1", True)]
     assert ext.prompt_rows() == [("hi", "hello")]
     assert ext.prompt_records()[0][3] == 2
-    assert ext.dialog_history()[0][0] == "<context><code>import math</code></context>\n<user-request>hi</user-request>"
+    hist = ext.dialog_history()
+    assert hist[0] == "<context><code>import math</code></context>\n<user-request>hi</user-request>"
     assert shell.execution_count == 4
 
 
@@ -578,7 +576,7 @@ def test_save_writes_notebook(tmp_path, capsys):
         metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)
 
 
-async def test_log_exact_writes_full_prompt_and_response(dummy_ai):
+async def test_log_exact_writes_full_prompt_and_response(dummy_codex):
     log_path = core.LOG_PATH
     shell = DummyShell()
     shell.history_manager.add(1, "a = 1")
@@ -615,62 +613,12 @@ def test_frontmatter_none():
     assert fm == {}
     assert body == "no frontmatter"
 
-def test_allowed_tools_from_frontmatter():
-    text = "---\nallowed-tools: foo bar\n---\nbody"
-    assert _allowed_tools(text) == {"foo", "bar"}
-
-def test_allowed_tools_from_backtick_refs(): assert _allowed_tools("use &`mytool` here") == {"mytool"}
-
-def test_allowed_tools_combined():
-    text = "---\nallowed-tools: foo\n---\nuse &`bar` here"
-    assert _allowed_tools(text) == {"foo", "bar"}
-
-def test_tool_refs_includes_notes():
-    notes = ["---\nallowed-tools: fmt\n---\nuse &`helper`"]
-    refs = _tool_refs("use &`main`", [], notes=notes)
-    assert refs == {"main", "fmt", "helper"}
-
-def test_pyrun_auto_added_to_tools():
-    pytest.importorskip("safepyrun")
-    from safepyrun import RunPython
-    shell = DummyShell()
-    shell.user_ns["pyrun"] = RunPython(g=shell.user_ns)
-    ext = IPyAIExtension(shell=shell).load()
-    tools, bad = ext.resolve_tools("do something", [])
-    assert any(t["function"]["name"] == "pyrun" for t in tools)
-
-def test_bash_auto_added_to_tools():
-    pytest.importorskip("safecmd")
-    from safecmd import bash
-    shell = DummyShell()
-    shell.user_ns["bash"] = bash
-    ext = IPyAIExtension(shell=shell).load()
-    tools, bad = ext.resolve_tools("do something", [])
-    assert any(t["function"]["name"] == "bash" for t in tools)
 
 def test_bash_injected_on_load():
     pytest.importorskip("safecmd")
     shell = DummyShell()
     ext = IPyAIExtension(shell=shell).load()
     assert callable(shell.user_ns.get("bash"))
-
-def test_pyrun_not_added_when_absent():
-    shell = DummyShell()
-    ext = IPyAIExtension(shell=shell).load()
-    tools, bad = ext.resolve_tools("do something", [])
-    assert not any(t.get("function", {}).get("name") == "pyrun" for t in tools)
-
-async def test_note_tool_refs_in_resolve(dummy_ai):
-    def helper():
-        "A helper tool"
-        return "ok"
-    shell,ext = mk_ext()
-    shell.user_ns["helper"] = helper
-    shell.history_manager.add(1, '"use &`helper` for this"')
-    shell.execution_count = 3
-    await ext.run_prompt("do something")
-    chat = dummy_ai.instances[-1]
-    assert any("helper" in str(t) for t in (chat.kwargs.get("tools") or []))
 
 
 ## Prompt variable tests ($`var`)
@@ -697,52 +645,26 @@ def test_format_var_xml():
 
 def test_format_var_xml_missing_returns_empty(): assert _format_var_xml({"missing"}, {}) == ""
 
-async def test_resolve_tools_missing_tool_not_raised(dummy_ai):
-    shell,ext = mk_ext()
-    await ext.run_prompt("call &`nonexistent`")
-    chat = dummy_ai.instances[-1]
-    assert '<warnings>' in chat.calls[0][0]
-    assert 'nonexistent' in chat.calls[0][0]
-
-async def test_resolve_tools_noncallable_noted(dummy_ai):
-    shell,ext = mk_ext()
-    shell.user_ns["x"] = 42
-    await ext.run_prompt("call &`x`")
-    chat = dummy_ai.instances[-1]
-    assert '<warnings>' in chat.calls[0][0]
-    assert 'x' in chat.calls[0][0]
-
-async def test_var_in_prompt_adds_variable_xml(dummy_ai):
+async def test_var_in_prompt_adds_variable_xml(dummy_codex):
     shell,ext = mk_ext()
     shell.user_ns["myval"] = 99
     await ext.run_prompt("check $`myval`")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
+    prompt = dummy_codex.turns[0]["prompt"]
     assert '<variable name="myval" type="int">99</variable>' in prompt
 
-async def test_missing_var_in_prompt_adds_note(dummy_ai):
+async def test_missing_var_in_prompt_adds_warning(dummy_codex):
     shell,ext = mk_ext()
     await ext.run_prompt("check $`missing_var`")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
+    prompt = dummy_codex.turns[0]["prompt"]
     assert '<warnings>' in prompt
     assert 'missing_var' in prompt
 
-async def test_mixed_missing_tools_and_vars_in_note(dummy_ai):
-    shell,ext = mk_ext()
-    await ext.run_prompt("use &`bad_tool` and $`bad_var`")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
-    assert 'bad_tool' in prompt
-    assert 'bad_var' in prompt
-
-async def test_var_from_history_included(dummy_ai):
+async def test_var_from_history_included(dummy_codex):
     shell,ext = mk_ext()
     shell.user_ns["x"] = 10
     await ext.run_prompt("first prompt with $`x`")
     await ext.run_prompt("second prompt")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
+    prompt = dummy_codex.turns[-1]["prompt"]
     assert '<variable name="x" type="int">10</variable>' in prompt
 
 ## Shell ref tests (!`cmd`)
@@ -766,20 +688,18 @@ def test_run_shell_refs_runs_commands():
 
 def test_run_shell_refs_empty_for_no_cmds(): assert _run_shell_refs(set()) == ""
 
-async def test_shell_in_prompt_adds_shell_xml(dummy_ai):
+async def test_shell_in_prompt_adds_shell_xml(dummy_codex):
     shell,ext = mk_ext()
     await ext.run_prompt("check !`echo test123`")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
+    prompt = dummy_codex.turns[0]["prompt"]
     assert '<shell cmd="echo test123">' in prompt
     assert 'test123' in prompt
 
-async def test_shell_from_history_included(dummy_ai):
+async def test_shell_from_history_included(dummy_codex):
     shell,ext = mk_ext()
     await ext.run_prompt("first with !`echo aaa`")
     await ext.run_prompt("second prompt")
-    chat = dummy_ai.instances[-1]
-    prompt = chat.calls[0][0]
+    prompt = dummy_codex.turns[-1]["prompt"]
     assert '<shell cmd="echo aaa">' in prompt
 
 def test_sysprompt_mentions_variables_and_shell():
@@ -820,7 +740,7 @@ def test_prompt_mode_empty_passthrough():
     assert transform_prompt_mode(["\n"]) == ["\n"]
     assert transform_prompt_mode([]) == []
 
-def test_prompt_mode_toggle(dummy_ai):
+def test_prompt_mode_toggle():
     shell,ext = mk_ext()
     assert not ext.prompt_mode
     ext.handle_line("prompt")
@@ -849,7 +769,7 @@ def test_prompt_mode_config_with_flag_toggles(monkeypatch, tmp_path):
     ext = IPyAIExtension(shell=shell, prompt_mode=True).load()
     assert not ext.prompt_mode
 
-def test_prompt_mode_registered_transformer(dummy_ai):
+def test_prompt_mode_registered_transformer():
     shell,ext = mk_ext()
     ext.handle_line("prompt")
     cts = shell.input_transformer_manager.cleanup_transforms
@@ -876,11 +796,11 @@ def test_extract_code_blocks_empty_response():
 # --- Session persistence tests ---
 
 def _mk_sessions_db():
-    "Create an in-memory DB with the IPython sessions, history, and ai_prompts tables."
+    "Create an in-memory DB with the IPython sessions, history, and codex_prompts tables."
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE sessions (session INTEGER PRIMARY KEY AUTOINCREMENT, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
     db.execute("CREATE TABLE history (session INTEGER, line INTEGER, source TEXT, source_raw TEXT)")
-    db.execute("CREATE TABLE ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER, prompt TEXT, response TEXT, history_line INTEGER)")
+    db.execute("CREATE TABLE codex_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER, prompt TEXT, response TEXT, history_line INTEGER)")
     return db
 
 def test_git_repo_root(tmp_path):
@@ -899,13 +819,13 @@ def test_list_sessions_exact_match():
     rows = _list_sessions(db, "/home/user/project")
     assert len(rows) == 1
     assert rows[0][0] == 1
-    assert rows[0][5] is None  # no ai_prompts table
+    assert rows[0][5] is None
 
 def test_list_sessions_with_prompts():
     db = _mk_sessions_db()
     db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', NULL, 5, '/proj')")
-    db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line) VALUES (1, 'first', 'r1', 0)")
-    db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line) VALUES (1, 'second', 'r2', 1)")
+    db.execute("INSERT INTO codex_prompts (session, prompt, response, history_line) VALUES (1, 'first', 'r1', 0)")
+    db.execute("INSERT INTO codex_prompts (session, prompt, response, history_line) VALUES (1, 'second', 'r2', 1)")
     rows = _list_sessions(db, "/proj")
     assert rows[0][5] == "second"
 
@@ -917,17 +837,14 @@ def test_list_sessions_git_fallback(tmp_path):
     db.execute("INSERT INTO sessions VALUES (2, '2025-01-02', NULL, 3, ?)", (sub,))
     rows = _list_sessions(db, sub)
     assert len(rows) == 1 and rows[0][0] == 2
-    # No exact match for a new subdir — falls back to repo root exact match
     rows = _list_sessions(db, str(tmp_path / "newsub"))
     assert len(rows) == 1 and rows[0][0] == 1
 
 def test_resume_session():
     db = _mk_sessions_db()
-    # Create "old" session
     db.execute("INSERT INTO sessions VALUES (5, '2025-01-01', '2025-01-01 12:00', 10, '/proj')")
     db.execute("INSERT INTO history VALUES (5, 1, 'x=1', 'x=1')")
     db.execute("INSERT INTO history VALUES (5, 2, 'y=2', 'y=2')")
-    # Create "fresh" session (simulating what IPython would do)
     db.execute("INSERT INTO sessions VALUES (6, '2025-01-02', NULL, NULL, '')")
     shell = DummyShell()
     shell.history_manager.db = db
@@ -936,14 +853,11 @@ def test_resume_session():
     shell.history_manager.input_hist_raw = [""]
     resume_session(shell, 5)
     assert shell.history_manager.session_number == 5
-    assert shell.execution_count == 3  # max(line=2) + 1
-    # Fresh session row deleted
+    assert shell.execution_count == 3
     assert db.execute("SELECT * FROM sessions WHERE session=6").fetchone() is None
-    # Old session reopened (end cleared)
     row = db.execute("SELECT end FROM sessions WHERE session=5").fetchone()
     assert row[0] is None
-    # input_hist lists padded
-    assert len(shell.history_manager.input_hist_parsed) == 3  # [""] + 2 pads
+    assert len(shell.history_manager.input_hist_parsed) == 3
 
 def test_resume_session_not_found():
     db = _mk_sessions_db()
@@ -953,9 +867,8 @@ def test_resume_session_not_found():
     shell.history_manager.session_number = 1
     with pytest.raises(ValueError, match="Session 99 not found"): resume_session(shell, 99)
 
-def test_store_cwd_in_remark(dummy_ai):
+def test_store_cwd_in_remark():
     shell,ext = mk_ext()
-    # Simulate what create_extension does
     hm = shell.history_manager
     hm.db.execute("CREATE TABLE IF NOT EXISTS sessions (session INTEGER PRIMARY KEY, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
     hm.db.execute("INSERT INTO sessions VALUES (?, ?, NULL, NULL, '')", (hm.session_number, "2025-01-01"))
@@ -963,13 +876,12 @@ def test_store_cwd_in_remark(dummy_ai):
     row = hm.db.execute("SELECT remark FROM sessions WHERE session=?", (hm.session_number,)).fetchone()
     assert row[0] == os.getcwd()
 
-def test_handle_line_sessions(dummy_ai):
+def test_handle_line_sessions():
     shell,ext = mk_ext()
     hm = shell.history_manager
     hm.db.execute("CREATE TABLE IF NOT EXISTS sessions (session INTEGER PRIMARY KEY, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
-    hm.db.execute("CREATE TABLE IF NOT EXISTS ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER NOT NULL, prompt TEXT NOT NULL, response TEXT NOT NULL, history_line INTEGER NOT NULL DEFAULT 0)")
     hm.db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', NULL, 5, ?)", (os.getcwd(),))
-    hm.db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line) VALUES (1, 'hello world', 'hi', 0)")
+    hm.db.execute("INSERT INTO codex_prompts (session, prompt, response, history_line) VALUES (1, 'hello world', 'hi', 0)")
     import io as _io
     buf = _io.StringIO()
     import sys as _sys
