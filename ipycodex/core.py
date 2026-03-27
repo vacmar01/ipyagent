@@ -9,7 +9,7 @@ from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
-from .codex_client import AsyncChat,AsyncStreamFormatter,FullResponse,contents,status_re,re_tools
+from .codex_client import AsyncChat,AsyncStreamFormatter,FullResponse,re_tools
 from rich.console import Console
 from rich.file_proxy import FileProxy
 from rich.live import Live
@@ -35,7 +35,7 @@ DEFAULT_COMPLETION_MODEL = "gpt-5.4-mini"
 _COMPLETION_SP = "You are a code completion engine for IPython. Return ONLY the completion text that should be inserted at the cursor position. No explanation, no markdown, no code fences, no prefix repetition."
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 
-The user interacts with you through `ipyai`, an IPython extension that turns input starting with a period into an AI prompt.
+The user interacts with you through `ipycodex`, an IPython extension that turns input starting with a period into an AI prompt.
 
 You may receive:
 - a `<context>` XML block containing recent IPython code, outputs, and notes
@@ -68,12 +68,12 @@ If a `<skills>` section is appended to this system prompt, it lists available sk
 
 Assume you are helping an interactive Python user. Prefer concise, accurate, practical responses. When writing code, default to Python unless the user asks for something else.
 """
-MAGIC_NAME = "ipyai"
+MAGIC_NAME = "ipycodex"
 LAST_PROMPT = "_ai_last_prompt"
 LAST_RESPONSE = "_ai_last_response"
-EXTENSION_NS = "_ipyai"
-EXTENSION_ATTR = "_ipyai_extension"
-RESET_LINE_NS = "_ipyai_reset_line"
+EXTENSION_NS = "_ipycodex"
+EXTENSION_ATTR = "_ipycodex_extension"
+RESET_LINE_NS = "_ipycodex_reset_line"
 PROMPTS_TABLE = "ai_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
 _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
@@ -92,7 +92,7 @@ def _ensure_prompts_table(db):
             db.execute(f"DROP TABLE {PROMPTS_TABLE}")
             db.execute(_PROMPTS_SQL)
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
-CONFIG_DIR = xdg_config_home()/"ipyai"
+CONFIG_DIR = xdg_config_home()/"ipycodex"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
@@ -147,9 +147,9 @@ def _tag(name: str, content="", **attrs) -> str:
     return f"<{name}{ats}>{content}</{name}>"
 
 
-def _is_ipyai_input(source: str) -> bool:
+def _is_ipycodex_input(source: str) -> bool:
     src = source.lstrip()
-    return src.startswith(".") or src.startswith("%ipyai") or src.startswith("%%ipyai")
+    return src.startswith(".") or src.startswith("%ipycodex") or src.startswith("%%ipycodex")
 
 
 def _is_note(source):
@@ -266,50 +266,55 @@ def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" el
 def _single_line(s: str) -> str: return re.sub(r"\s+", " ", s.strip())
 
 def compact_tool_display(text: str) -> str:
-    text = re_tools.sub(lambda m: f"🔧 {_single_line(m.group('summary'))}\n", text)
-    text = status_re.sub(lambda m: '' if m.group(1) and f"🔧 <code>{m.group(1)}" in text else m.group(0), text)
-    return text
+    return re_tools.sub(lambda m: f"🔧 {_single_line(m.group('summary'))}\n", text)
 
 
-def _strip_thinking(text):
-    cleaned = re.sub(r'🧠+\n*', '', text).lstrip('\n')
-    return cleaned if cleaned else text
+def _thinking_to_blockquote(text):
+    def _bq(m):
+        from .codex_client import _blockquote
+        return _blockquote(m.group(1).strip()) + "\n"
+    return re.sub(r'<thinking>\n(.*?)\n</thinking>\n*', _bq, text, flags=re.DOTALL)
 
 
-def _display_text(text): return _strip_thinking(compact_tool_display(text))
+def _display_text(text): return _thinking_to_blockquote(compact_tool_display(text))
 
 
 def _markdown_renderable(text: str, code_theme: str, markdown_cls=Markdown):
     return markdown_cls(text, code_theme=code_theme, inline_code_theme=code_theme, inline_code_lexer="python")
 
 
-async def _astream_to_live_markdown(chunks, out, code_theme: str, partial=None, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
-    first = None
+async def _astream_to_live_markdown(chunks, out, code_theme: str, formatter=None, partial=None, console_cls=Console, markdown_cls=Markdown,
+    live_cls=Live) -> str:
+    console = console_cls(file=out, force_terminal=True)
+    text = ""
+    live = None
+    live_cm = None
     async for chunk in chunks:
         if chunk:
-            first = chunk
-            break
-    if first is None: return ""
-    console = console_cls(file=out, force_terminal=True)
-    text = first
-    if partial is not None: partial.append(text)
-    with live_cls(_markdown_renderable(_display_text(text), code_theme, markdown_cls), console=console,
-        auto_refresh=False, transient=False, redirect_stdout=True, redirect_stderr=False, vertical_overflow="visible") as live:
-        async for chunk in chunks:
-            if not chunk: continue
             text += chunk
             if partial is not None: partial.append(chunk)
-            live.update(_markdown_renderable(_display_text(text), code_theme, markdown_cls), refresh=True)
-    return text
+        display_text = getattr(formatter, "display_text", None) if formatter is not None else None
+        current = text if display_text is None else display_text
+        if not current: continue
+        renderable = _markdown_renderable(_display_text(current), code_theme, markdown_cls)
+        if live is None:
+            live_cm = live_cls(renderable, console=console, auto_refresh=False, transient=False, redirect_stdout=True, redirect_stderr=False,
+                vertical_overflow="visible")
+            live = live_cm.__enter__()
+        else: live.update(renderable, refresh=True)
+    if live_cm is not None: live_cm.__exit__(None, None, None)
+    return getattr(formatter, "final_text", text)
 
 
 async def astream_to_stdout(stream, formatter_cls: Callable[..., AsyncStreamFormatter]=AsyncStreamFormatter, out=None,
     code_theme: str=DEFAULT_CODE_THEME, partial=None, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
     out = sys.stdout if out is None else out
     fmt = formatter_cls()
+    is_tty = getattr(out, "isatty", lambda: False)()
+    if hasattr(fmt, "is_tty"): fmt.is_tty = is_tty
     chunks = fmt.format_stream(stream)
-    if getattr(out, "isatty", lambda: False)(): return await _astream_to_live_markdown(chunks, out, code_theme, partial=partial,
-        console_cls=console_cls, markdown_cls=markdown_cls, live_cls=live_cls)
+    if is_tty: return await _astream_to_live_markdown(chunks, out, code_theme, formatter=fmt, partial=partial, console_cls=console_cls,
+        markdown_cls=markdown_cls, live_cls=live_cls)
     res = []
     async for chunk in chunks:
         if not chunk: continue
@@ -317,11 +322,11 @@ async def astream_to_stdout(stream, formatter_cls: Callable[..., AsyncStreamForm
         out.flush()
         res.append(chunk)
         if partial is not None: partial.append(chunk)
-    text = "".join(res)
-    if text and not text.endswith("\n"):
+    written = "".join(res)
+    if written and not written.endswith("\n"):
         out.write("\n")
         out.flush()
-    return text
+    return getattr(fmt, "final_text", written)
 
 
 def _validate_level(name: str, value: str, default: str) -> str:
@@ -389,16 +394,16 @@ def _event_to_cell(o):
         source = o.get("source", "")
         if _is_note(source):
             return dict(id=_cell_id(), cell_type="markdown", source=_note_str(source),
-                metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0), source=source)))
-        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0))),
+                metadata=dict(ipycodex=dict(kind="code", line=o.get("line", 0), source=source)))
+        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipycodex=dict(kind="code", line=o.get("line", 0))),
             outputs=[], execution_count=None)
     if o.get("kind") == "prompt":
         meta = dict(kind="prompt", line=o.get("line", 0), history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))
-        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipyai=meta))
+        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipycodex=meta))
 
 
 def _cell_to_event(cell):
-    meta = cell.get("metadata", {}).get("ipyai", {})
+    meta = cell.get("metadata", {}).get("ipycodex", {})
     kind = meta.get("kind")
     if kind == "code":
         source = meta.get("source") or cell.get("source", "")
@@ -409,7 +414,7 @@ def _cell_to_event(cell):
 
 
 def _load_notebook(path) -> list:
-    "Load events from an ipyai .ipynb file."
+    "Load events from an ipycodex .ipynb file."
     path = Path(path)
     if not path.exists(): raise FileNotFoundError(f"Notebook not found: {path}")
     data = json.loads(path.read_text())
@@ -530,11 +535,11 @@ class AIMagics(Magics):
         super().__init__(shell)
         self.ext = ext
 
-    @line_magic("ipyai")
-    def ipyai_line(self, line: str=""): return self.ext.handle_line(line)
+    @line_magic("ipycodex")
+    def ipycodex_line(self, line: str=""): return self.ext.handle_line(line)
 
-    @cell_magic("ipyai")
-    async def ipyai_cell(self, line: str="", cell: str | None=None): await self.ext.run_prompt(cell)
+    @cell_magic("ipycodex")
+    async def ipycodex_cell(self, line: str="", cell: str | None=None): await self.ext.run_prompt(cell)
 
 
 class IPyAIExtension:
@@ -606,7 +611,7 @@ class IPyAIExtension:
         parts = []
         for _,line,pair in entries:
             source,output = pair
-            if not source or _is_ipyai_input(source): continue
+            if not source or _is_ipycodex_input(source): continue
             if _is_note(source): parts.append(_tag("note", _note_str(source)))
             else:
                 parts.append(_tag("code", source))
@@ -653,7 +658,7 @@ class IPyAIExtension:
         events = []
         for _,line,pair in self.full_history():
             source,_ = pair
-            if not source or _is_ipyai_input(source): continue
+            if not source or _is_ipycodex_input(source): continue
             events.append(dict(kind="code", line=line, source=source))
         for pid,prompt,response,history_line in self.prompt_records():
             events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, response=response))
@@ -663,7 +668,7 @@ class IPyAIExtension:
         path = Path(path)
         if path.suffix != '.ipynb': path = path.with_suffix('.ipynb')
         events = [{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()]
-        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
+        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)
         path.write_text(json.dumps(nb, indent=2) + "\n")
         return path, sum(o["kind"] == "code" for o in events), sum(o["kind"] == "prompt" for o in events)
 
@@ -784,9 +789,9 @@ class IPyAIExtension:
         parts.append("</current-input>")
         parts.append("\nReturn ONLY the completion text to insert immediately after the prefix."
             " Do not repeat the prefix or include any explanation.")
-        chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP, cache=True)
+        chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP)
         res = await chat("\n".join(parts))
-        return (contents(res).content or "").strip()
+        return (res.content or "").strip()
 
     def _patch_lexer(self):
         from IPython.terminal.ptutils import IPythonPTLexer
@@ -797,7 +802,7 @@ class IPyAIExtension:
         def _lex_document(self, document):
             text = document.text.lstrip()
             if ext.prompt_mode and not text.startswith((';', '!', '%')): return _plain.lex_document(document)
-            if text.startswith('.') or text.startswith('%%ipyai'): return _plain.lex_document(document)
+            if text.startswith('.') or text.startswith('%%ipycodex'): return _plain.lex_document(document)
             return _orig(self, document)
         IPythonPTLexer.lex_document = _lex_document
 
@@ -866,7 +871,7 @@ class IPyAIExtension:
             "Set thinking level"), ("search <l|m|h>", "Set search level"), ("prompt", "Toggle prompt mode"),
             ("save <file>", "Save session to .ipynb"), ("load <file>", "Load session from .ipynb"),
             ("reset", "Clear AI prompts from current session"), ("sessions", "List previous sessions")]
-        print("Usage: %ipyai <command>\n")
+        print("Usage: %ipycodex <command>\n")
         for cmd, desc in cmds: print(f"  {cmd:20s} {desc}")
 
     def handle_line(self, line: str):
@@ -890,11 +895,11 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         clean = arg.strip()
         if cmd == "save":
-            if not clean: return print("Usage: %ipyai save <filename>")
+            if not clean: return print("Usage: %ipycodex save <filename>")
             path, ncode, nprompt = self.save_notebook(clean)
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {path}.")
         if cmd == "load":
-            if not clean: return print("Usage: %ipyai load <filename>")
+            if not clean: return print("Usage: %ipycodex load <filename>")
             try:
                 path, ncode, nprompt = self.load_notebook(clean)
                 return print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
@@ -905,7 +910,7 @@ class IPyAIExtension:
                 think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
                 log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
-        return print(f"Unknown command: {line!r}. Run %ipyai help for available commands.")
+        return print(f"Unknown command: {line!r}. Run %ipycodex help for available commands.")
 
     async def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
@@ -937,7 +942,7 @@ class IPyAIExtension:
         sp = self.system_prompt
         if self.skills: sp += _skills_xml(self.skills)
         chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
-        stream = await chat(full_prompt, stream=True, think=self.think, search=self.search, max_steps=41)
+        stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
         loop = asyncio.get_running_loop()
         task = asyncio.current_task()
         loop.add_signal_handler(signal.SIGINT, task.cancel)
@@ -950,7 +955,7 @@ class IPyAIExtension:
         finally: loop.remove_signal_handler(signal.SIGINT)
         self.shell.user_ns[LAST_RESPONSE] = text
         ng = getattr(self.shell, '_ipythonng_extension', None)
-        if ng: ng._pty_output = _strip_thinking(text)
+        if ng: ng._pty_output = _thinking_to_blockquote(text)
         self.log_exact_exchange(full_prompt, text)
         self.save_prompt(prompt, text, history_line)
         return None
@@ -978,10 +983,10 @@ def create_extension(shell=None, resume=None, load=None, prompt_mode=False, **kw
         except FileNotFoundError as e: print(str(e))
     hm = shell.history_manager
     with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
-    if not getattr(shell, '_ipyai_atexit', False):
+    if not getattr(shell, '_ipycodex_atexit', False):
         sid = hm.session_number
-        atexit.register(lambda: print(f"\nTo resume: ipyai -r {sid}"))
-        shell._ipyai_atexit = True
+        atexit.register(lambda: print(f"\nTo resume: ipycodex -r {sid}"))
+        shell._ipycodex_atexit = True
     return ext
 
 

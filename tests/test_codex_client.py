@@ -1,6 +1,6 @@
-import json
+import asyncio,json
 
-import ipyai.codex_client as cc
+import ipycodex.codex_client as cc
 
 
 class FakeClient:
@@ -10,6 +10,10 @@ class FakeClient:
         self.calls.append((prompt, kwargs))
         yield "first "
         yield "second"
+
+
+async def _aiter(*items):
+    for o in items: yield o
 
 
 async def test_asyncchat_collects_stream(monkeypatch):
@@ -59,3 +63,83 @@ def test_completed_dynamic_tool_block_is_parseable():
     payload = json.loads(m.group(3))
     assert payload["call"]["function"] == "load_skill"
     assert "allowed-tools" in payload["result"]
+
+
+async def test_consume_turn_emits_command_stream_events():
+    client = cc._CodexAppServer()
+    client.events = asyncio.Queue()
+    thread_id,turn_id = "thread_1","turn_1"
+    msgs = [
+        dict(method="item/started", params=dict(threadId=thread_id, turnId=turn_id,
+            item=dict(type="commandExecution", id="cmd_1", command="printf hi", cwd="/tmp"))),
+        dict(method="item/commandExecution/outputDelta", params=dict(threadId=thread_id, turnId=turn_id, itemId="cmd_1", delta="hi\n")),
+        dict(method="item/completed", params=dict(threadId=thread_id, turnId=turn_id,
+            item=dict(type="commandExecution", id="cmd_1", command="printf hi", cwd="/tmp", status="completed", exitCode=0))),
+        dict(method="turn/completed", params=dict(threadId=thread_id, turnId=turn_id, turn=dict(id=turn_id)))]
+    for msg in msgs: await client.events.put(msg)
+
+    chunks = [o async for o in client._consume_turn(thread_id, turn_id, {})]
+
+    assert chunks[:2] == [dict(kind="command_start", id="cmd_1", command="printf hi", cwd="/tmp"),
+        dict(kind="command_delta", id="cmd_1", delta="hi\n", command="printf hi", cwd="/tmp")]
+    assert chunks[2]["kind"] == "command_complete"
+    assert "printf hi" in chunks[2]["text"]
+    assert '"result": "hi\\n"' in chunks[2]["text"]
+
+
+async def test_consume_turn_emits_thinking_events():
+    client = cc._CodexAppServer()
+    client.events = asyncio.Queue()
+    thread_id,turn_id = "thread_1","turn_1"
+    msgs = [
+        dict(method="item/started", params=dict(threadId=thread_id, turnId=turn_id,
+            item=dict(type="reasoning", id="r_1"))),
+        dict(method="item/reasoning/textDelta", params=dict(threadId=thread_id, turnId=turn_id, itemId="r_1", contentIndex=0, delta="let me ")),
+        dict(method="item/reasoning/textDelta", params=dict(threadId=thread_id, turnId=turn_id, itemId="r_1", contentIndex=0, delta="think")),
+        dict(method="item/completed", params=dict(threadId=thread_id, turnId=turn_id,
+            item=dict(type="reasoning", id="r_1"))),
+        dict(method="item/started", params=dict(threadId=thread_id, turnId=turn_id,
+            item=dict(type="agentMessage", id="msg_1"))),
+        dict(method="item/agentMessage/delta", params=dict(threadId=thread_id, turnId=turn_id, itemId="msg_1", delta="Hello")),
+        dict(method="turn/completed", params=dict(threadId=thread_id, turnId=turn_id, turn=dict(id=turn_id)))]
+    for msg in msgs: await client.events.put(msg)
+
+    chunks = [o async for o in client._consume_turn(thread_id, turn_id, {})]
+
+    assert chunks[0] == dict(kind="thinking_start")
+    assert chunks[1] == dict(kind="thinking_delta", delta="let me ")
+    assert chunks[2] == dict(kind="thinking_delta", delta="think")
+    assert chunks[3] == dict(kind="thinking_end")
+    assert chunks[4] == "Hello"
+
+
+async def test_async_stream_formatter_thinking_blockquotes_display_and_stores_tags():
+    fmt = cc.AsyncStreamFormatter()
+    fmt.is_tty = True
+    seen = []
+    stream = _aiter(
+        dict(kind="thinking_start"),
+        dict(kind="thinking_delta", delta="hmm"),
+        dict(kind="thinking_end"),
+        "Hello")
+    async for _ in fmt.format_stream(stream): seen.append(fmt.display_text)
+
+    assert any("> hmm" in o for o in seen)
+    assert "<thinking>\nhmm\n</thinking>" in fmt.final_text
+    assert "Hello" in fmt.final_text
+
+
+async def test_async_stream_formatter_streams_live_command_text_only_to_display():
+    final = cc._tool_block("<code>printf hi</code>", dict(result="hi\n"))
+    fmt = cc.AsyncStreamFormatter()
+    fmt.is_tty = True
+    seen = []
+    stream = _aiter(dict(kind="command_start", id="cmd_1", command="printf hi", cwd="/tmp"),
+        dict(kind="command_delta", id="cmd_1", delta="hi\n", command="printf hi", cwd="/tmp"),
+        dict(kind="command_complete", id="cmd_1", text=final))
+    async for _ in fmt.format_stream(stream): seen.append(fmt.display_text)
+
+    assert any("⌛ <code>printf hi</code>" in o for o in seen[:2])
+    assert any("hi\n" in o for o in seen[:2])
+    assert fmt.final_text == final
+    assert "⌛ <code>printf hi</code>" not in fmt.final_text

@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ipyai"
+name = "ipycodex"
 dynamic = ["version"]
 description = "Minimal IPython backtick-to-AI extension"
 readme = "README.md"
@@ -13,19 +13,19 @@ authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
 dependencies = ["fastcore>=1.12.31", "ipython>=9", "rich", "mistletoe", "ipythonng", "safepyrun", "safecmd"]
 
 [project.scripts]
-ipyai = "ipyai.cli:main"
+ipycodex = "ipycodex.cli:main"
 
 [project.urls]
-Source = "https://github.com/answerdotai/ipyai"
+Source = "https://github.com/answerdotai/ipycodex"
 
 [project.optional-dependencies]
 dev = ["build>=1.0.0", "fastship>=0.0.6", "pytest", "pytest-asyncio", "twine>=5.0.0"]
 
 [tool.setuptools.dynamic]
-version = {attr = "ipyai.__version__"}
+version = {attr = "ipycodex.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["ipyai*"]
+include = ["ipycodex*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,52 +1,52 @@
-# ipyai
+# ipycodex
 
-`ipyai` is an IPython extension that turns any input starting with `.` into an AI prompt.
+`ipycodex` is an IPython extension that turns any input starting with `.` into an AI prompt.
 
 It is aimed at terminal IPython, not notebook frontends.
 
 ## Install
 
 ```bash
-pip install ipyai
+pip install ipycodex
 ```
 
-`ipyai` now talks to the local `codex app-server`, so you also need the `codex` CLI installed and authenticated on the machine running IPython. Set `IPYAI_CODEX_CMD` if `codex` is not on your `PATH` or you want to point at a different binary.
+`ipycodex` now talks to the local `codex app-server`, so you also need the `codex` CLI installed and authenticated on the machine running IPython. Set `IPYAI_CODEX_CMD` if `codex` is not on your `PATH` or you want to point at a different binary.
 
 ## CLI
 
-`ipyai` provides a standalone command that launches IPython with `ipyai` and `ipythonng` extensions pre-loaded and output history enabled:
+`ipycodex` provides a standalone command that launches IPython with `ipycodex` and `ipythonng` extensions pre-loaded and output history enabled:
 
 ```bash
-ipyai
+ipycodex
 ```
 
 Resume a previous session:
 
 ```bash
-ipyai -r        # interactive session picker
-ipyai -r 43     # resume session 43 directly
+ipycodex -r        # interactive session picker
+ipycodex -r 43     # resume session 43 directly
 ```
 
-On exit, `ipyai` prints the session ID so you can resume later.
+On exit, `ipycodex` prints the session ID so you can resume later.
 
 ## Load As Extension
 
 ```python
-%load_ext ipyai
+%load_ext ipycodex
 ```
 
 If you change the package in a running shell:
 
 ```python
-%reload_ext ipyai
+%reload_ext ipycodex
 ```
 
-## How To Auto-Load `ipyai`
+## How To Auto-Load `ipycodex`
 
 Add this to an `ipython_config.py` file used by terminal `ipython`:
 
 ```python
-c.TerminalIPythonApp.extensions = ["ipyai.core"]
+c.TerminalIPythonApp.extensions = ["ipycodex.core"]
 ```
 
 Good places for that file include:
@@ -87,7 +87,7 @@ Backslash-Enter continuation in the terminal:
 with risks and rollback steps
 ```
 
-`ipyai` also provides a line and cell magic named `%ipyai` / `%%ipyai`.
+`ipycodex` also provides a line and cell magic named `%ipycodex` / `%%ipycodex`.
 
 Note: `.01 * 3` and similar expressions starting with `.` followed by a digit will be interpreted as prompts. Write `0.01 * 3` instead.
 
@@ -101,25 +101,25 @@ Any IPython cell containing only a string literal is treated as a "note". Notes 
 
 Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. When saving a session, notes are stored as markdown cells in the startup notebook.
 
-## `%ipyai` Commands
+## `%ipycodex` Commands
 
 ```python
-%ipyai
-%ipyai model gpt-5.4
-%ipyai completion_model gpt-5.4-mini
-%ipyai think m
-%ipyai search h
-%ipyai code_theme monokai
-%ipyai log_exact true
-%ipyai save
-%ipyai reset
+%ipycodex
+%ipycodex model gpt-5.4
+%ipycodex completion_model gpt-5.4-mini
+%ipycodex think m
+%ipycodex search h
+%ipycodex code_theme monokai
+%ipycodex log_exact true
+%ipycodex save
+%ipycodex reset
 ```
 
-- `%ipyai` — show current settings and config file paths
-- `%ipyai model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
-- `%ipyai save` — save the current session (code, notes, and AI history) to `startup.ipynb`
-- `%ipyai reset` — clear AI prompt history for the current session
-- `%ipyai sessions` — list resumable sessions for the current directory (falls back to git repo root)
+- `%ipycodex` — show current settings and config file paths
+- `%ipycodex model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
+- `%ipycodex save` — save the current session (code, notes, and AI history) to `startup.ipynb`
+- `%ipycodex reset` — clear AI prompt history for the current session
+- `%ipycodex sessions` — list resumable sessions for the current directory (falls back to git repo root)
 
 ## Tools
 
@@ -145,7 +145,7 @@ In addition to those dynamic tools, the Codex app-server can use its own built-i
 
 ## Skills
 
-`ipyai` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
+`ipycodex` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
 
 - `.agents/skills/` in the current directory and every parent directory
 - `~/.config/agents/skills/`
@@ -169,7 +169,7 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 ## Keyboard Shortcuts
 
-`ipyai` registers prompt_toolkit keybindings:
+`ipycodex` registers prompt_toolkit keybindings:
 
 | Shortcut | Action |
 |---|---|
@@ -181,24 +181,24 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 Code blocks are extracted from fenced markdown blocks tagged as `python` or `py`. Blocks tagged with other languages (bash, json, etc.) or untagged blocks are skipped.
 
-Syntax highlighting is disabled while typing `.` prompts and `%%ipyai` cells so natural language isn't coloured as Python.
+Syntax highlighting is disabled while typing `.` prompts and `%%ipycodex` cells so natural language isn't coloured as Python.
 
 ## Startup Replay
 
-`%ipyai save` snapshots the current session to `~/.config/ipyai/startup.ipynb`:
+`%ipycodex save` snapshots the current session to `~/.config/ipycodex/startup.ipynb`:
 
 - code cells are saved as code cells (notes become markdown cells)
 - AI prompts are saved with the response as markdown and the prompt in cell metadata
 
-When `ipyai` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
+When `ipycodex` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
 
 ## Output Rendering
 
-Responses are streamed and rendered as markdown in the terminal via Rich. Thinking indicators (🧠) are displayed during model reasoning and removed once the response begins. Tool calls are compacted to a short form like `🔧 f(x=1) => 2`.
+Responses are streamed and rendered as markdown in the terminal via Rich. Model reasoning is displayed as blockquoted text during streaming and stored in `<thinking>` blocks in the response. Server-side command stdout is streamed live in TTY sessions, while the stored transcript keeps the final compact tool block. Tool calls are compacted to a short form like `🔧 f(x=1) => 2`.
 
 ## Configuration
 
-Config files live under `~/.config/ipyai/` and are created on demand:
+Config files live under `~/.config/ipycodex/` and are created on demand:
 
 | File | Purpose |
 |---|---|

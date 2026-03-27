@@ -4,16 +4,27 @@ from types import SimpleNamespace
 import pytest
 from IPython.core.inputtransformer2 import TransformerManager
 
-import ipyai.core as core
-from ipyai.core import (DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK, EXTENSION_NS,
+import ipycodex.core as core
+from ipycodex.core import (DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK, EXTENSION_NS,
     IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS, _allowed_tools, _discover_skills, _eval_code_blocks,
     _extract_code_blocks, _format_var_xml, _git_repo_root, _list_sessions, _parse_skill, _shell_names, _shell_refs, _skills_xml,
-    _strip_thinking, _tool_refs, _tool_results, _run_shell_refs, _var_names, _var_refs, astream_to_stdout, compact_tool_display,
+    _thinking_to_blockquote, _tool_refs, _tool_results, _run_shell_refs, _var_names, _var_refs, astream_to_stdout, compact_tool_display,
     load_skill, prompt_from_lines, resume_session, transform_dots, transform_prompt_mode)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
         async for o in stream: yield o
+
+class DisplayStateFormatter:
+    def __init__(self):
+        self.display_text = ""
+        self.final_text = ""
+
+    async def format_stream(self, stream):
+        async for o in stream:
+            self.display_text = o["display"]
+            self.final_text = o["final"]
+            yield o.get("chunk", "")
 
 class TTYStringIO(io.StringIO):
     def isatty(self): return True
@@ -107,7 +118,7 @@ class DummyShell:
 
 @pytest.fixture(autouse=True)
 def _config_paths(monkeypatch, tmp_path):
-    cfg_dir = tmp_path/"ipyai"
+    cfg_dir = tmp_path/"ipycodex"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(core, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(core, "CONFIG_PATH", cfg_dir/"config.json")
@@ -137,7 +148,7 @@ def test_transform_dots_executes_ai_magic_call():
         def run_cell_magic(self, magic, line, cell): seen.update(magic=magic, line=line, cell=cell)
     code = "".join(transform_dots([".hello\n", "world\n"]))
     exec(code, {"get_ipython": lambda: DummyIPython()})
-    assert seen == dict(magic="ipyai", line="", cell="hello\nworld\n")
+    assert seen == dict(magic="ipycodex", line="", cell="hello\nworld\n")
 
 
 async def _chunks(*items):
@@ -223,6 +234,19 @@ def test_astream_to_stdout_updates_live_markdown_as_chunks_arrive():
     assert out.getvalue() == "RICH:ab"
 
 
+def test_astream_to_stdout_tty_uses_formatter_display_and_final_text():
+    DummyConsole.instances = []
+    DummyLive.instances = []
+    out = TTYStringIO()
+    stream = _chunks(dict(display="⌛ running", final=""), dict(display="final answer", final="stored response"))
+    text = asyncio.run(astream_to_stdout(stream,
+        formatter_cls=DisplayStateFormatter, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive))
+
+    assert text == "stored response"
+    assert [o.text for o in DummyLive.instances[-1].renderables] == ["⌛ running", "final answer"]
+    assert out.getvalue() == "RICH:final answer"
+
+
 
 
 async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
@@ -238,7 +262,7 @@ async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
     assert dummy_ai.instances[-1].calls == [(
         "<user-request>tell me something</user-request>",
         True,
-        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK, max_steps=41),
+        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
     )]
     assert dummy_ai.instances[-1].kwargs["model"] == ext.model
     assert dummy_ai.instances[-1].kwargs["sp"] == DEFAULT_SYSTEM_PROMPT
@@ -272,13 +296,13 @@ async def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch
     ng = SimpleNamespace(_pty_output=None)
     shell._ipythonng_extension = ng
 
-    async def _fake_astream_to_stdout(stream, **kwargs): return "🧠🧠🧠\n\nHello world"
+    async def _fake_astream_to_stdout(stream, **kwargs): return "<thinking>\nhmm\n</thinking>\n\nHello world"
     monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
     monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
 
     await ext.run_prompt("test")
 
-    assert ng._pty_output == "Hello world"
+    assert ng._pty_output == "> hmm\n\nHello world"
 
 
 def test_unexpected_prompt_table_schema_is_recreated():
@@ -333,7 +357,7 @@ async def test_config_values_drive_model_think_and_search(dummy_ai):
     assert dummy_ai.instances[-1].calls == [(
         "<user-request>tell me something</user-request>",
         True,
-        dict(search="h", think="m", max_steps=41),
+        dict(search="h", think="m"),
     )]
 
 
@@ -423,7 +447,7 @@ async def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
         "<context><code>from IPython.display import HTML,Markdown,Pretty,display</code><code>Markdown('A **b** *c*')</code>"
         "<output>A **b** *c*</output></context>\n<user-request>Do you see the earlier prints etc from the first prompt?</user-request>",
         True,
-        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK, max_steps=41),
+        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
     )]
 
 
@@ -505,7 +529,7 @@ def test_save_notebook_converts_notes_to_markdown_cells(tmp_path):
     nb = json.loads(path.read_text())
     c0 = {k:v for k,v in nb["cells"][0].items() if k != "id"}
     assert c0 == dict(cell_type="markdown", source="# My note",
-        metadata=dict(ipyai=dict(kind="code", line=1, source='"# My note"')))
+        metadata=dict(ipycodex=dict(kind="code", line=1, source='"# My note"')))
     assert nb["cells"][1]["cell_type"] == "code"
     assert nb["cells"][1]["source"] == "x = 1"
 
@@ -540,11 +564,11 @@ def test_history_context_uses_lines_since_last_prompt_only():
 
 
 def test_load_notebook_replays_code_and_restores_prompts(tmp_path):
-    cells = [dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
-        dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
-        dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None)]
+    cells = [dict(cell_type="code", source="import math", metadata=dict(ipycodex=dict(kind="code", line=1)), outputs=[], execution_count=None),
+        dict(cell_type="markdown", source="hello", metadata=dict(ipycodex=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
+        dict(cell_type="code", source="x = 1", metadata=dict(ipycodex=dict(kind="code", line=3)), outputs=[], execution_count=None)]
     nb_path = tmp_path / "test.ipynb"
-    nb_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)))
+    nb_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)))
     shell = DummyShell()
     shell.execution_count = 1
     ext = IPyAIExtension(shell=shell).load()
@@ -574,12 +598,12 @@ def test_save_writes_notebook(tmp_path, capsys):
     assert all("id" in c for c in nb["cells"])
     assert _strip_ids(nb) == dict(
         cells=[
-            dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
+            dict(cell_type="code", source="import math", metadata=dict(ipycodex=dict(kind="code", line=1)), outputs=[], execution_count=None),
             dict(cell_type="markdown", source="first response",
-                metadata=dict(ipyai=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
-            dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None),
+                metadata=dict(ipycodex=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
+            dict(cell_type="code", source="x = 1", metadata=dict(ipycodex=dict(kind="code", line=3)), outputs=[], execution_count=None),
         ],
-        metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
+        metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)
 
 
 async def test_log_exact_writes_full_prompt_and_response(dummy_ai):
@@ -602,7 +626,7 @@ def test_cleanup_transform_prevents_help_syntax_interference():
     tm.cleanup_transforms.insert(1, transform_dots)
 
     code = tm.transform_cell(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?")
-    assert code == "get_ipython().run_cell_magic('ipyai', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
+    assert code == "get_ipython().run_cell_magic('ipycodex', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
     assert tm.check_complete(".I am testing my new AI prompt system.\\") == ("incomplete", 0)
     assert tm.check_complete(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
 
@@ -979,7 +1003,7 @@ def test_sysprompt_mentions_variables_and_shell():
 def test_prompt_mode_wraps_input_as_magic():
     lines = transform_prompt_mode(["hello world\n"])
     assert "run_cell_magic" in lines[0]
-    assert "ipyai" in lines[0]
+    assert "ipycodex" in lines[0]
     assert "hello world" in lines[0]
 
 def test_prompt_mode_passes_through_semicolon_as_python():
@@ -1045,20 +1069,9 @@ def test_prompt_mode_registered_transformer(dummy_ai):
     assert transform_prompt_mode not in cts
 
 
-def test_strip_thinking_shows_brains_while_thinking(): assert _strip_thinking("🧠🧠🧠") == "🧠🧠🧠"
-def test_strip_thinking_removes_brains_once_content_arrives(): assert _strip_thinking("🧠🧠🧠\n\nHello world") == "Hello world"
-def test_strip_thinking_handles_no_brains(): assert _strip_thinking("Hello world") == "Hello world"
-
-
-def test_live_stream_strips_thinking_from_display():
-    DummyConsole.instances = []
-    DummyLive.instances = []
-    out = TTYStringIO()
-    text = run_stream("🧠🧠🧠", "\n\n", "Hello", out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
-    assert text == "🧠🧠🧠\n\nHello"
-    rendered = [o.text for o in DummyLive.instances[-1].renderables]
-    assert rendered[0] == "🧠🧠🧠"
-    assert rendered[-1] == "Hello"
+def test_thinking_to_blockquote_converts(): assert _thinking_to_blockquote("<thinking>\nhmm\n</thinking>\n\nHello world") == "> hmm\n\nHello world"
+def test_thinking_to_blockquote_no_thinking(): assert _thinking_to_blockquote("Hello world") == "Hello world"
+def test_thinking_to_blockquote_multiline(): assert _thinking_to_blockquote("<thinking>\nline1\nline2\n</thinking>\n\nHi") == "> line1\n> line2\n\nHi"
 
 
 def test_extract_code_blocks_python_only():
@@ -1180,15 +1193,15 @@ def test_handle_line_sessions(dummy_ai):
     assert "hello world" in out
 
 
-def test_e2e_ipyai_session(tmp_path):
-    "E2E: drive ipyai interactively via pexpect — prompt, response, session lifecycle."
+def test_e2e_ipycodex_session(tmp_path):
+    "E2E: drive ipycodex interactively via pexpect — prompt, response, session lifecycle."
     import pexpect
     hist_file = str(tmp_path / "hist.sqlite")
     env = {k: v for k, v in os.environ.items() if k != 'IPYTHONNG_FLAGS'}
     env['XDG_CONFIG_HOME'] = str(tmp_path / "config")
     env['IPYTHON_DIR'] = str(tmp_path / "ipython")
 
-    args = ['-m', 'IPython', '--ext', 'ipyai', f'--HistoryManager.hist_file={hist_file}',
+    args = ['-m', 'IPython', '--ext', 'ipycodex', f'--HistoryManager.hist_file={hist_file}',
         '--TerminalIPythonApp.display_banner=False', '--colors=NoColor']
     child = pexpect.spawn(sys.executable, args, env=env, timeout=60, encoding='utf-8')
 
@@ -1208,8 +1221,8 @@ def test_e2e_ipyai_session(tmp_path):
     # Wait for next prompt (AI response finished)
     wait_prompt(3)
 
-    # Check %ipyai sessions lists something
-    child.sendline('%ipyai sessions')
+    # Check %ipycodex sessions lists something
+    child.sendline('%ipycodex sessions')
     wait_prompt(4)
 
     # Exit and check for resume message

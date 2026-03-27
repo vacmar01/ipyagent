@@ -1,15 +1,86 @@
 import asyncio,html,inspect,json,os,re,shlex
 from collections import defaultdict
-from types import SimpleNamespace
 
-THINKING = "🧠🧠🧠"
 _HIST_SP = ("\n\nIf the current user input contains a <conversation-history> block, treat it as serialized prior turns. "
     "Each <turn> contains one <user> and one <assistant> entry.")
 
 
+def _blockquote(text):
+    return "".join(f"> {line}\n" if line.strip() else ">\n" for line in text.splitlines()) if text else ""
+
+
 class AsyncStreamFormatter:
+    def __init__(self):
+        self.is_tty = False
+        self.final_text = ""
+        self.display_text = ""
+        self._live_commands = {}
+        self._thinking_text = ""
+        self._in_thinking = False
+
+    def _update_display(self):
+        parts = []
+        if self._thinking_text:
+            parts.append(_blockquote(self._thinking_text))
+        live = "\n\n".join(self._live_command_text(o) for o in self._live_commands.values())
+        rest = self.final_text
+        if rest: parts.append(rest)
+        if live:
+            sep = "\n\n" if parts and not (parts[-1]).endswith("\n") else ""
+            parts.append(sep + live)
+        self.display_text = "\n\n".join(p for p in parts if p) if len(parts) > 1 else (parts[0] if parts else "")
+
+    def _append_final(self, text):
+        if text: self.final_text += text
+        self._update_display()
+
+    def _live_command_text(self, state):
+        cmd = html.escape(state.get("command") or "command")
+        text = f"⌛ <code>{cmd}</code>"
+        if output := state.get("output"): text += "\n\n" + _fenced_block(output, "text")
+        return text.rstrip()
+
+    def _format_event(self, event):
+        if isinstance(event, str):
+            self._append_final(event)
+            return event
+        if not isinstance(event, dict): return ""
+        kind = event.get("kind")
+        if kind == "thinking_start":
+            self._in_thinking = True
+            self._thinking_text = ""
+            return ""
+        if kind == "thinking_delta":
+            self._thinking_text += event.get("delta", "")
+            self._update_display()
+            return ""
+        if kind == "thinking_end":
+            self._in_thinking = False
+            stored = f"<thinking>\n{self._thinking_text}\n</thinking>\n\n" if self._thinking_text else ""
+            self._thinking_text = ""
+            self._append_final(stored)
+            return "" if self.is_tty else stored
+        if kind == "command_start":
+            self._live_commands[event.get("id")] = dict(command=event.get("command"), cwd=event.get("cwd"), output="")
+            self._update_display()
+            return ""
+        if kind == "command_delta":
+            state = self._live_commands.setdefault(event.get("id"), dict(command=event.get("command"), cwd=event.get("cwd"), output=""))
+            if event.get("command") and not state.get("command"): state["command"] = event["command"]
+            state["output"] += event.get("delta", "")
+            self._update_display()
+            return ""
+        if kind == "command_complete":
+            self._live_commands.pop(event.get("id"), None)
+            text = event.get("text", "")
+            self._append_final(text)
+            return "" if self.is_tty else text
+        text = event.get("text", "")
+        if text: self._append_final(text)
+        return text
+
     async def format_stream(self, stream):
-        async for o in stream: yield o
+        async for o in stream: yield self._format_event(o)
 
 
 class FullResponse(str):
@@ -17,10 +88,6 @@ class FullResponse(str):
     def content(self): return str(self)
 
 
-def contents(res): return SimpleNamespace(content=str(res))
-
-
-status_re = re.compile(r"<status>(.*?)</status>", flags=re.DOTALL)
 re_tools = re.compile(r"(<details class='tool-usage-details'>\s*<summary>(?P<summary>.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>)",
     flags=re.DOTALL)
 
@@ -28,7 +95,7 @@ re_tools = re.compile(r"(<details class='tool-usage-details'>\s*<summary>(?P<sum
 def _pkg_version():
     try:
         from importlib.metadata import version
-        return version("ipyai")
+        return version("ipycodex")
     except Exception: return "0"
 
 
@@ -86,6 +153,15 @@ def _tool_block(summary, payload):
         f"{_json(payload)}\n"
         "```\n\n"
         "</details>\n")
+
+
+def _fenced_block(text, info=""):
+    text = text or ""
+    fence = "~" * 3
+    while fence in text: fence += "~"
+    if text and not text.endswith("\n"): text += "\n"
+    info = info or ""
+    return f"{fence}{info}\n{text}{fence}\n"
 
 
 def _content_items_text(items):
@@ -178,7 +254,7 @@ class _CodexAppServer:
         async with self.init_lock:
             if self.initialized and self.proc and self.proc.returncode is None: return
             await self._start()
-            await self.request("initialize", dict(clientInfo=dict(name="ipyai", title="ipyai", version=_pkg_version()),
+            await self.request("initialize", dict(clientInfo=dict(name="ipycodex", title="ipycodex", version=_pkg_version()),
                 capabilities=dict(experimentalApi=True)))
             await self.notify("initialized")
             self.initialized = True
@@ -209,7 +285,7 @@ class _CodexAppServer:
         return params
 
     async def _consume_turn(self, thread_id, turn_id, ns):
-        agent_seen,cmd_output = set(),defaultdict(str)
+        agent_seen,cmd_output,cmd_items = set(),defaultdict(str),{}
         saw_text = thinking = False
         while True:
             msg = await self.events.get()
@@ -223,27 +299,45 @@ class _CodexAppServer:
             if params.get("turnId") not in (None, turn_id): continue
             if method == "error": raise RuntimeError(params)
             if method == "item/started" and (item := params.get("item")):
-                if item.get("type") == "reasoning" and not saw_text and not thinking:
+                if item.get("type") == "reasoning" and not thinking:
                     thinking = True
-                    yield THINKING
+                    yield dict(kind="thinking_start")
+                elif item.get("type") == "commandExecution":
+                    cmd_items[item.get("id")] = dict(command=item.get("command"), cwd=item.get("cwd"))
+                    yield dict(kind="command_start", id=item.get("id"), command=item.get("command"), cwd=item.get("cwd"))
                 elif item.get("type") == "agentMessage" and saw_text and item.get("phase") == "final_answer": yield "\n\n"
                 continue
+            if method == "item/reasoning/textDelta":
+                yield dict(kind="thinking_delta", delta=params.get("delta", ""))
+                continue
             if method == "item/agentMessage/delta":
-                if thinking and not saw_text:
-                    yield "\n\n"
+                if thinking:
+                    yield dict(kind="thinking_end")
                     thinking = False
                 saw_text = True
                 agent_seen.add(params.get("itemId"))
                 yield params.get("delta", "")
                 continue
             if method == "item/commandExecution/outputDelta":
-                cmd_output[params.get("itemId")] += params.get("delta", "")
+                item_id = params.get("itemId")
+                cmd_output[item_id] += params.get("delta", "")
+                item = cmd_items.get(item_id) or {}
+                yield dict(kind="command_delta", id=item_id, delta=params.get("delta", ""), command=item.get("command"), cwd=item.get("cwd"))
                 continue
             if method == "item/completed" and (item := params.get("item")):
+                if item.get("type") == "reasoning" and thinking:
+                    yield dict(kind="thinking_end")
+                    thinking = False
+                    continue
                 if (text := self._completed_item_text(item, agent_seen, cmd_output)):
                     if item.get("type") != "agentMessage" and saw_text and not text.startswith("\n"): text = "\n" + text
-                    saw_text = True
-                    yield text
+                    if item.get("type") == "commandExecution":
+                        cmd_items.pop(item.get("id"), None)
+                        saw_text = True
+                        yield dict(kind="command_complete", id=item.get("id"), text=text)
+                    else:
+                        saw_text = True
+                        yield text
                 continue
             if method == "turn/completed":
                 turn = params.get("turn") or {}
@@ -287,11 +381,10 @@ def get_codex_client():
 
 
 class AsyncChat:
-    def __init__(self, model=None, sp="", ns=None, hist=None, tools=None, cache=None):
+    def __init__(self, model=None, sp="", ns=None, hist=None, tools=None):
         self.model,self.sp,self.ns,self.hist,self.tools = model,sp,ns or {},hist or [],tools or []
-        self.cache = cache
 
-    async def __call__(self, prompt, stream=False, think=None, search=None, output_schema=None, **kwargs):
+    async def __call__(self, prompt, stream=False, think=None, search=None, output_schema=None):
         stream_it = get_codex_client().turn_stream(prompt, model=self.model, sp=self.sp, hist=self.hist, tools=self.tools, ns=self.ns,
             think=think, search=search, output_schema=output_schema)
         if stream: return stream_it
