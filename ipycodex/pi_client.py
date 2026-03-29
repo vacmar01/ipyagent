@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import socket
 from pathlib import Path
 
 
@@ -107,20 +106,18 @@ class PiToolBridge:
         self._running = False
 
         # Close connection if exists
-        if self._writer:
-            self._writer.close()
-            self._writer = None
+        self._writer.close()
+        self._writer = None
 
         # Close server
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
+        self.server.close()
+        await self.server.wait_closed()
+        self.server = None
 
         # Remove socket file
-        if self.socket_path and self.socket_path.exists():
+        if self.socket_path.exists():
             self.socket_path.unlink()
-            self.socket_path = None
+        self.socket_path = None
 
     async def _handle_connection(self, reader, writer):
         """Handle a new connection from the pi extension"""
@@ -257,9 +254,27 @@ class PiClient:
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=None,
             env=env,
         )
+
+    async def stop(self):
+        """Stop the pi subprocess and cleanup bridge"""
+        # Stop the bridge first (closes socket)
+        if self.bridge:
+            await self.bridge.stop()
+            self.bridge = None
+
+        # Terminate the subprocess
+        if self.proc:
+            if self.proc.returncode is None:  # Still running
+                self.proc.terminate()
+                try:
+                    await asyncio.wait_for(self.proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self.proc.kill()  # Force kill if graceful shutdown fails
+                    await self.proc.wait()
+            self.proc = None
 
 
 class PiChat:
@@ -276,15 +291,16 @@ class PiChat:
         self.provider = provider
         self.client = None
 
-    async def __call__(
-        self, prompt, stream=False, think=None, search=None, output_schema=None
-    ):
+    async def __call__(self, prompt, think=None):
         """Send a prompt to pi and return response stream"""
         # Create client if not exists
         if self.client is None:
+            model = self.model
+            if think and think != "off":
+                model = f"{self.model}:{think}"
             self.client = PiClient(
                 provider=self.provider,
-                model=self.model,
+                model=model,
                 system_prompt=self.sp,
                 user_ns=self.ns,
             )
@@ -300,9 +316,14 @@ class PiChat:
         # Return stream
         return self._stream(full_prompt)
 
+    async def stop(self):
+        """Stop the pi client and cleanup resources"""
+        if self.client:
+            await self.client.stop()
+            self.client = None
+
     async def _stream(self, prompt):
         """Stream response from pi via JSONL RPC"""
-        import json
 
         if self.client is None or self.client.proc is None:
             raise RuntimeError("Client not started")
@@ -316,7 +337,7 @@ class PiChat:
 
         # Read streaming events from stdout
         tool_args = {}  # cache args by tool_call_id from start events
-        async for line in self._iter_jsonl(self.client.proc.stdout, timeout=None):
+        async for line in self._iter_jsonl(self.client.proc.stdout):
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -422,19 +443,11 @@ class PiChat:
                     }
                 continue
 
-    async def _iter_jsonl(self, stream, timeout=None, chunk_size=65536):
+    async def _iter_jsonl(self, stream, chunk_size=65536):
         """Yield JSONL lines from a stream without readline() size limits."""
         buf = b""
         while True:
-            try:
-                if timeout is None:
-                    chunk = await stream.read(chunk_size)
-                else:
-                    chunk = await asyncio.wait_for(
-                        stream.read(chunk_size), timeout=timeout
-                    )
-            except asyncio.TimeoutError:
-                break
+            chunk = await stream.read(chunk_size)
 
             if not chunk:
                 if buf.strip():
