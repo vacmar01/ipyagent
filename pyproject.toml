@@ -7,10 +7,21 @@ name = "ipycodex"
 dynamic = ["version"]
 description = "Minimal IPython backtick-to-AI extension"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
-dependencies = ["fastcore>=1.12.31", "ipython>=9", "rich", "mistletoe", "ipythonng", "safepyrun", "safecmd"]
+dependencies = [
+    "fastcore>=1.12.31",
+    "ipython>=9",
+    "rich",
+    "mistletoe",
+    "toolslm",
+    "kittytgp @ git+https://github.com/AnswerDotAI/kittytgp.git",
+    "ipythonng @ git+https://github.com/AnswerDotAI/ipythonng.git",
+    "safepyrun @ git+https://github.com/AnswerDotAI/safepyrun.git",
+    "safecmd @ git+https://github.com/AnswerDotAI/safecmd.git",
+    "pyskills"
+]
 
 [project.scripts]
 ipycodex = "ipycodex.cli:main"

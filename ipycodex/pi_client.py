@@ -235,8 +235,6 @@ class PiClient:
             "--mode",
             "rpc",
             "--no-session",
-            "--tools",
-            "bash",
             "--system-prompt",
             self.system_prompt,
             "--provider",
