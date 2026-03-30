@@ -128,11 +128,6 @@ class PiToolBridge:
     async def _handle_connection(self, reader, writer):
         """Handle a new connection from the pi extension"""
         self._writer = writer
-
-        if self._tools:
-            existing_tools = list(self._tools.values())
-            await self._send_tools(existing_tools)
-
         self._ready.set()
 
         try:
@@ -306,13 +301,11 @@ class PiChat:
             )
             await self.client.start()
 
-        # Register tools with bridge before sending prompt
-        if self.tools and self.client.bridge:
-            await self.client.bridge.register_tools(self.tools)
-
-        # Wait for extension to connect and receive tools
+        # Wait for extension to connect first, then register tools
         if self.client.bridge:
             await self.client.bridge.wait_ready()
+            if self.tools:
+                await self.client.bridge.register_tools(self.tools)
 
         # Build prompt with history XML prepended
         full_prompt = _history_xml(self.hist) + prompt
