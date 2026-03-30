@@ -1,16 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import * as net from "net";
-import * as fs from "fs";
-
-const DEBUG = process.env.IPYCODEX_DEBUG === "1";
-
-const LOG_FILE = process.env.IPYCODEX_LOG || `/tmp/ipycodex-bridge-${process.pid}.log`;
-
-function log(message: string) {
-  const timestamp = new Date().toISOString();
-  fs.appendFileSync(LOG_FILE, `[${timestamp}] ${message}\n`);
-}
 
 let socket: net.Socket | null = null;
 const pendingRequests = new Map<
@@ -18,53 +8,59 @@ const pendingRequests = new Map<
   { resolve: (value: any) => void; reject: (error: Error) => void }
 >();
 
-function connectToSocket(pi: ExtensionAPI, socketPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    socket = net.createConnection(socketPath, () => {
-      log(`Connected to ${socketPath}`);
-      resolve();
-    });
+async function connectToSocket(pi: ExtensionAPI, socketPath: string): Promise<void> {
+  const MAX_RETRIES = 10;
+  const RETRY_DELAY = 500;
 
-    socket.on("data", (data) => {
-      const lines = data.toString().split("\n").filter((l) => l.trim());
-      for (const line of lines) {
-        try {
-          const msg = JSON.parse(line);
-          if (msg.method === "tool_result") {
-            log(`Tool result received: ${msg.request_id} (success: ${msg.success})`);
-            const pending = pendingRequests.get(msg.request_id);
-            if (!pending) continue;
-            pendingRequests.delete(msg.request_id);
-            msg.success
-              ? pending.resolve(msg.result)
-              : pending.reject(new Error(msg.result || "Tool failed"));
-          } else if (msg.method === "register_tools") {
-            const toolCount = msg.tools?.length || 0;
-            log(`Registering ${toolCount} tools from message`);
-            registerToolsFromMessage(pi, msg);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket = net.createConnection(socketPath, () => {
+          resolve();
+        });
+
+        socket.on("data", (data) => {
+          const lines = data.toString().split("\n").filter((l) => l.trim());
+          for (const line of lines) {
+            try {
+              const msg = JSON.parse(line);
+              if (msg.method === "tool_result") {
+                const pending = pendingRequests.get(msg.request_id);
+                if (!pending) continue;
+                pendingRequests.delete(msg.request_id);
+                msg.success
+                  ? pending.resolve(msg.result)
+                  : pending.reject(new Error(msg.result || "Tool failed"));
+              } else if (msg.method === "register_tools") {
+                registerToolsFromMessage(pi, msg);
+              }
+            } catch {}
           }
-        } catch {
-          log(`Bad JSON: ${line}`);
-        }
+        });
+
+        socket.on("error", (err) => {
+          reject(err);
+        });
+
+        socket.on("close", () => {
+          socket = null;
+        });
+      });
+      return;
+    } catch {
+      if (attempt < MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY));
       }
-    });
+    }
+  }
 
-    socket.on("error", (err) => {
-      log(`Socket error: ${err.message}`);
-    });
-
-    socket.on("close", () => {
-      log("Socket closed");
-      socket = null;
-    });
-  });
+  throw new Error(`Failed to connect to ${socketPath} after ${MAX_RETRIES} attempts`);
 }
 
 async function callPythonTool(name: string, args: any): Promise<any> {
   if (!socket) throw new Error("Not connected to ipycodex");
 
   const requestId = Math.random().toString(36).slice(2);
-  log(`Tool call: ${name} (request_id: ${requestId})`);
 
   return new Promise((resolve, reject) => {
     pendingRequests.set(requestId, { resolve, reject });
@@ -89,7 +85,6 @@ async function callPythonTool(name: string, args: any): Promise<any> {
 function registerToolsFromMessage(pi: ExtensionAPI, msg: any) {
   const tools = msg.tools || [];
   for (const tool of tools) {
-    // Expect Codex-style: {"type": "function", "function": {...}}
     const fn = tool.function;
     if (!fn?.name) continue;
 
@@ -106,34 +101,25 @@ function registerToolsFromMessage(pi: ExtensionAPI, msg: any) {
         };
       },
     });
-
-    log(`Registered: ${fn.name}`);
   }
 }
 
 export default function (pi: ExtensionAPI) {
   const socketPath = process.env.IPYCODEX_SOCK;
-  if (!socketPath) {
-    log("Error: IPYCODEX_SOCK not set");
-    return;
-  }
+  if (!socketPath) return;
 
   pi.on("session_start", async () => {
-    log("Session started, connecting to socket...");
     await connectToSocket(pi, socketPath);
   });
 
   pi.on("session_shutdown", async () => {
-    log("Session shutdown, cleaning up...");
     if (socket) {
       socket.destroy();
       socket = null;
     }
-    // Clean up pending requests
-    for (const [id, pending] of pendingRequests) {
+    for (const [, pending] of pendingRequests) {
       pending.reject(new Error("Session shutdown"));
     }
     pendingRequests.clear();
-    log("Cleanup complete");
   });
 }

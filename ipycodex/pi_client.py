@@ -79,6 +79,7 @@ class PiToolBridge:
         self._writer = None
         self._running = False
         self._tools = {}
+        self._ready = asyncio.Event()
 
     def _get_socket_path(self):
         """Get socket path, preferring $XDG_RUNTIME_DIR with fallback to /tmp"""
@@ -91,31 +92,36 @@ class PiToolBridge:
         """Start the Unix socket server"""
         self.socket_path = self._get_socket_path()
 
-        # Remove stale socket if it exists
         if self.socket_path.exists():
             self.socket_path.unlink()
 
-        # Create Unix socket server
         self.server = await asyncio.start_unix_server(
             self._handle_connection, path=str(self.socket_path)
         )
         self._running = True
 
+    async def wait_ready(self, timeout=10):
+        """Wait until the extension has connected and tools have been sent"""
+        await asyncio.wait_for(self._ready.wait(), timeout)
+
     async def stop(self):
         """Stop the server and cleanup socket"""
         self._running = False
+        self._ready.clear()
 
         # Close connection if exists
-        self._writer.close()
-        self._writer = None
+        if self._writer:
+            self._writer.close()
+            self._writer = None
 
         # Close server
-        self.server.close()
-        await self.server.wait_closed()
-        self.server = None
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            self.server = None
 
         # Remove socket file
-        if self.socket_path.exists():
+        if self.socket_path and self.socket_path.exists():
             self.socket_path.unlink()
         self.socket_path = None
 
@@ -123,10 +129,11 @@ class PiToolBridge:
         """Handle a new connection from the pi extension"""
         self._writer = writer
 
-        # Send existing tools to new client
         if self._tools:
             existing_tools = list(self._tools.values())
             await self._send_tools(existing_tools)
+
+        self._ready.set()
 
         try:
             while self._running:
@@ -147,7 +154,6 @@ class PiToolBridge:
             method = msg.get("method")
 
             if method == "tool_call":
-                # Handle tool call from pi extension
                 result = await self._handle_tool_call(msg)
                 response = {
                     "method": "tool_result",
@@ -159,7 +165,6 @@ class PiToolBridge:
                 await writer.drain()
 
         except Exception as e:
-            # Send error response
             response = {
                 "method": "tool_result",
                 "request_id": msg.get("request_id"),
@@ -194,12 +199,10 @@ class PiToolBridge:
 
     async def register_tools(self, tools):
         """Register tools and send them to the connected client"""
-        # Store tools by name for easy lookup
         for tool in tools:
             name = tool["function"]["name"]
             self._tools[name] = tool
 
-        # Send to connected client
         await self._send_tools(tools)
 
     async def _send_tools(self, tools):
@@ -226,7 +229,6 @@ class PiClient:
 
     async def start(self):
         """Start the bridge server and spawn pi subprocess"""
-        # Create and start the tool bridge
         self.bridge = PiToolBridge(user_ns=self.user_ns)
         await self.bridge.start()
 
@@ -235,6 +237,8 @@ class PiClient:
             "--mode",
             "rpc",
             "--no-session",
+            "--tools",
+            "bash",
             "--system-prompt",
             self.system_prompt,
             "--provider",
@@ -243,22 +247,20 @@ class PiClient:
             self.model,
         ]
 
-        # Set environment with socket path
         env = os.environ.copy()
         env["IPYCODEX_SOCK"] = str(self.bridge.socket_path)
 
-        # Spawn pi subprocess
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=None,
             env=env,
+            cwd=str(Path(__file__).parent.parent),
         )
 
     async def stop(self):
         """Stop the pi subprocess and cleanup bridge"""
-        # Stop the bridge first (closes socket)
         if self.bridge:
             await self.bridge.stop()
             self.bridge = None
@@ -307,6 +309,10 @@ class PiChat:
         # Register tools with bridge before sending prompt
         if self.tools and self.client.bridge:
             await self.client.bridge.register_tools(self.tools)
+
+        # Wait for extension to connect and receive tools
+        if self.client.bridge:
+            await self.client.bridge.wait_ready()
 
         # Build prompt with history XML prepended
         full_prompt = _history_xml(self.hist) + prompt
