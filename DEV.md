@@ -1,6 +1,6 @@
 # DEV
 
-This project is small. Nearly all runtime behavior lives in [ipycodex/core.py](ipycodex/core.py) and [ipycodex/codex_client.py](ipycodex/codex_client.py), so getting productive mainly means understanding those files and the tests in [tests/test_core.py](tests/test_core.py).
+This project is small. Nearly all runtime behavior lives in [ipyagent/core.py](ipyagent/core.py) and [ipyagent/codex_client.py](ipyagent/codex_client.py), so getting productive mainly means understanding those files and the tests in [tests/test_core.py](tests/test_core.py).
 
 ## Setup
 
@@ -51,25 +51,25 @@ Implemented:
 - AI inline completion via Alt-. (calls `completion_model` with session context, shows as prompt_toolkit suggestion; partial accept via M-f preserves remaining suggestion)
 - keyboard shortcuts: Alt-Up/Down (history jump), Alt-Shift-W (all code blocks), Alt-Shift-1..9 (nth block), Alt-Shift-Up/Down (cycle blocks) via prompt_toolkit
 - code block extraction uses `mistletoe` markdown parser (not regex) for correctness
-- syntax highlighting disabled for `.` prompts and `%%ipycodex` cells (patches `IPythonPTLexer` at class level)
+- syntax highlighting disabled for `.` prompts and `%%ipyagent` cells (patches `IPythonPTLexer` at class level)
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
 - skill eval blocks: `#| eval: true` python code blocks in skills are executed via `shell.run_cell` when loaded
 - per-directory session persistence: CWD stored in IPython `sessions.remark`, session resume via `resume_session()`
-- interactive session picker via `prompt_toolkit.radiolist_dialog` for `ipycodex -r`
-- `%ipycodex sessions` command listing resumable sessions with last prompt preview
-- `ipycodex` CLI entry point (console script) launching IPython with ipythonng + ipycodex + output history
+- interactive session picker via `prompt_toolkit.radiolist_dialog` for `ipyagent -r`
+- `%ipyagent sessions` command listing resumable sessions with last prompt preview
+- `ipyagent` CLI entry point (console script) launching IPython with ipythonng + ipyagent + output history
 - minimal IPython compatibility patches for `SyntaxTB` and `inspect.getfile` (guarded with `once=True` to coexist with ipykernel_helper)
 
 ## File Map
 
-- [ipycodex/core.py](ipycodex/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, skill discovery, session persistence/resume, async streaming, Rich rendering, keybindings
-- [ipycodex/codex_client.py](ipycodex/codex_client.py): local Codex app-server client, stdio JSON-RPC transport, ephemeral thread/turn orchestration, dynamic tool dispatch, and tool/command item rendering
-- [ipycodex/cli.py](ipycodex/cli.py): `ipycodex` console script entry point — parses flags via `ipythonng.cli.parse_flags`, launches IPython with extensions and output history
-- [ipycodex/__init__.py](ipycodex/__init__.py): package exports and version
+- [ipyagent/core.py](ipyagent/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, skill discovery, session persistence/resume, async streaming, Rich rendering, keybindings
+- [ipyagent/codex_client.py](ipyagent/codex_client.py): local Codex app-server client, stdio JSON-RPC transport, ephemeral thread/turn orchestration, dynamic tool dispatch, and tool/command item rendering
+- [ipyagent/cli.py](ipyagent/cli.py): `ipyagent` console script entry point — parses flags via `ipythonng.cli.parse_flags`, launches IPython with extensions and output history
+- [ipyagent/__init__.py](ipyagent/__init__.py): package exports and version
 - [tests/test_core.py](tests/test_core.py): focused unit tests for transformation, history, config, tools, notes, skills, sessions, rendering, and thinking display
 - [tests/test_codex_client.py](tests/test_codex_client.py): focused tests for the Codex wrapper layer
-- [pyproject.toml](pyproject.toml): packaging, console script (`ipycodex`), and fastship configuration
+- [pyproject.toml](pyproject.toml): packaging, console script (`ipyagent`), and fastship configuration
 - [.agents/skills/](/.agents/skills/): project-local Agent Skills
 
 ## Prompt History And Context
@@ -96,17 +96,17 @@ The stored rows are roughly:
 - first prompt: `history_line=1`
 - second prompt: `history_line=3`
 
-So for the second prompt, `ipycodex` knows:
+So for the second prompt, `ipyagent` knows:
 
 - the code context before it should include `x = 1`, but not `import math`
 - the prompt itself happened immediately after line 3
 
-For each new prompt, `ipycodex` reconstructs chat history as alternating user / assistant entries:
+For each new prompt, `ipyagent` reconstructs chat history as alternating user / assistant entries:
 
 - the user entry is `<context>...</context><user-request>...</user-request>`
 - the assistant entry is the stored full response
 
-The `<context>` block contains all non-`ipycodex` code run since the previous AI prompt in the current session, plus `Out[...]` history when IPython has it. String-literal-only cells are sent as `<note>` instead of `<code>` (detected via `ast`). The XML is intentionally simple:
+The `<context>` block contains all non-`ipyagent` code run since the previous AI prompt in the current session, plus `Out[...]` history when IPython has it. String-literal-only cells are sent as `<note>` instead of `<code>` (detected via `ast`). The XML is intentionally simple:
 
 ```xml
 <context><code>a = 1</code><note>This is a note</note><code>a</code><output>1</output></context>
@@ -116,17 +116,17 @@ The `<context>` block contains all non-`ipycodex` code run since the previous AI
 
 The extension lifecycle is:
 
-1. `%load_ext ipycodex` calls `load_ipython_extension`, which parses `IPYTHONNG_FLAGS` and delegates to `create_extension`.
+1. `%load_ext ipyagent` calls `load_ipython_extension`, which parses `IPYTHONNG_FLAGS` and delegates to `create_extension`.
 2. `create_extension` ensures the `ai_prompts` table exists, optionally resumes a session (or shows the interactive picker), creates the extension, stores CWD in `sessions.remark`, and registers the atexit handler.
 3. `IPyAIExtension.__init__` loads config, system prompt, discovers skills, and loads the startup file.
-4. `IPyAIExtension.load()` registers `%ipycodex` / `%%ipycodex`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, registers keybindings, and applies `startup.ipynb` if the session is still fresh.
-4. Any cell whose first character is `.` is rewritten by `transform_dots()` into `get_ipython().run_cell_magic('ipycodex', '', prompt)`.
-5. `AIMagics.ipycodex()` routes line input to `handle_line()` and cell input directly to the `_run_prompt()` coroutine (returned to the async `run_cell_magic` patch for awaiting).
-6. `_run_prompt()` reconstructs conversation history, resolves tools, adds skills tools/system prompt if skills were discovered, runs the local `AsyncChat` wrapper from `ipycodex.codex_client`, streams the response, optionally writes an exact log entry, and stores the full response.
+4. `IPyAIExtension.load()` registers `%ipyagent` / `%%ipyagent`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, registers keybindings, and applies `startup.ipynb` if the session is still fresh.
+4. Any cell whose first character is `.` is rewritten by `transform_dots()` into `get_ipython().run_cell_magic('ipyagent', '', prompt)`.
+5. `AIMagics.ipyagent()` routes line input to `handle_line()` and cell input directly to the `_run_prompt()` coroutine (returned to the async `run_cell_magic` patch for awaiting).
+6. `_run_prompt()` reconstructs conversation history, resolves tools, adds skills tools/system prompt if skills were discovered, runs the local `AsyncChat` wrapper from `ipyagent.codex_client`, streams the response, optionally writes an exact log entry, and stores the full response.
 
-The Codex wrapper currently starts a fresh ephemeral app-server thread for each prompt and completion request. Prior dialog history is serialized into a `<conversation-history>` block prepended to the current turn input, while the current system prompt is sent as Codex `developerInstructions`. This keeps `ipycodex`'s existing SQLite-backed history and session replay model intact without needing to persist Codex thread IDs.
+The Codex wrapper currently starts a fresh ephemeral app-server thread for each prompt and completion request. Prior dialog history is serialized into a `<conversation-history>` block prepended to the current turn input, while the current system prompt is sent as Codex `developerInstructions`. This keeps `ipyagent`'s existing SQLite-backed history and session replay model intact without needing to persist Codex thread IDs.
 
-At import time, `ipycodex` also applies two small global IPython bugfixes (shared with `ipykernel_helper`, guarded with `once=True` so only the first loader applies them):
+At import time, `ipyagent` also applies two small global IPython bugfixes (shared with `ipykernel_helper`, guarded with `once=True` so only the first loader applies them):
 
 - `SyntaxTB.structured_traceback` coerces non-string `evalue.msg` values to `str`
 - `inspect.getfile` is wrapped to always return a string
@@ -159,7 +159,7 @@ Important detail: only the raw prompt and raw response are stored in SQLite. Con
 
 ## SQLite Storage
 
-`ipycodex` uses IPython's existing history database connection at `shell.history_manager.db`.
+`ipyagent` uses IPython's existing history database connection at `shell.history_manager.db`.
 
 Table schema:
 
@@ -177,18 +177,18 @@ Notes:
 
 - rows are scoped by IPython `session_number`
 - `history_line` is used to decide which code cells belong in the next prompt's generated `<context>` block
-- if `ai_prompts` does not match the expected schema, `ipycodex` drops and recreates it instead of migrating it
-- `%ipycodex reset` deletes only current-session rows and sets a reset baseline in `user_ns`
+- if `ai_prompts` does not match the expected schema, `ipyagent` drops and recreates it instead of migrating it
+- `%ipyagent reset` deletes only current-session rows and sets a reset baseline in `user_ns`
 
 ## Startup Snapshot
 
 `startup.ipynb` is stored as a Jupyter notebook (nbformat v4.5 with cell IDs) next to the other XDG files.
 
-`%ipycodex save` writes a merged event stream for the current session as notebook cells:
+`%ipyagent save` writes a merged event stream for the current session as notebook cells:
 
-- code events become code cells (with `metadata.ipycodex.kind="code"`)
-- string-literal-only code (notes) become markdown cells (with original source preserved in `metadata.ipycodex.source` for round-trip replay)
-- prompt events become markdown cells containing the AI response (with prompt text in `metadata.ipycodex.prompt`)
+- code events become code cells (with `metadata.ipyagent.kind="code"`)
+- string-literal-only code (notes) become markdown cells (with original source preserved in `metadata.ipyagent.source` for round-trip replay)
+- prompt events become markdown cells containing the AI response (with prompt text in `metadata.ipyagent.prompt`)
 
 On a fresh load:
 
@@ -200,16 +200,16 @@ Legacy `startup.json` files (pre-notebook format) are still supported for loadin
 
 ## Session Persistence And Resume
 
-`ipycodex` stores the working directory in IPython's `sessions.remark` column (an unused TEXT field) at extension load time. This enables per-directory session listing and resume.
+`ipyagent` stores the working directory in IPython's `sessions.remark` column (an unused TEXT field) at extension load time. This enables per-directory session listing and resume.
 
 Key functions:
 
 - `_list_sessions(db, cwd)` — queries sessions for the given directory, falls back to git repo root exact match; includes the last AI prompt per session via a subquery on `ai_prompts`
-- `_fmt_session()` — formats a session row for display (shared by `%ipycodex sessions` and the interactive picker)
+- `_fmt_session()` — formats a session row for display (shared by `%ipyagent sessions` and the interactive picker)
 - `_pick_session(rows)` — interactive `radiolist_dialog` picker from prompt_toolkit
 - `resume_session(shell, session_id)` — deletes the fresh session row, restores `session_number` and `execution_count`, pads `input_hist_parsed`/`input_hist_raw`, reopens the old session (clears `end` timestamp)
 
-Resume is triggered by `IPYTHONNG_FLAGS` env var (set by the `ipycodex` CLI when `-r` is passed). The `_ng_parser` (argparse) parses `-r <id>` or bare `-r` (const=-1 for interactive picker).
+Resume is triggered by `IPYTHONNG_FLAGS` env var (set by the `ipyagent` CLI when `-r` is passed). The `_ng_parser` (argparse) parses `-r <id>` or bare `-r` (const=-1 for interactive picker).
 
 On exit, an `atexit` handler prints the session ID for easy resume.
 
@@ -241,7 +241,7 @@ history_manager.get_range(session=0, start=start, stop=stop, raw=True, output=Tr
 
 Rules:
 
-- inputs that look like `ipycodex` commands (starting with `.` or `%ipycodex`) are skipped
+- inputs that look like `ipyagent` commands (starting with `.` or `%ipyagent`) are skipped
 - string-literal-only cells (detected by `_is_note` via `ast.parse`) become `<note>` tags containing the string value
 - normal code becomes `<code>...</code>`
 - output history, when present, becomes `<output>...</output>`
@@ -269,11 +269,11 @@ Shared helpers:
 - collects all tool names from all sources via `_tool_refs()`
 - silently skips tools from non-prompt sources that are missing from `user_ns`
 - builds tool schemas with `get_schema_nm(...)` so the exposed tool name matches the namespace symbol instead of `__call__` for callable objects
-- passes those schemas to `ipycodex.codex_client.AsyncChat(..., tools=...)`, which exposes them to Codex app-server as `dynamicTools`
+- passes those schemas to `ipyagent.codex_client.AsyncChat(..., tools=...)`, which exposes them to Codex app-server as `dynamicTools`
 
 The `load_skill` tool is added to `user_ns` at extension init time when skills are discovered. It is resolved through the normal tool mechanism (skills always contribute `load_skill` to the tool name set) rather than being special-cased in `_run_prompt`.
 
-The tool lookup is intentionally live against the active namespace, so changing a function in the IPython session changes the tool used by subsequent prompts. Async callables are awaited inside `ipycodex.codex_client` before their results are returned to app-server.
+The tool lookup is intentionally live against the active namespace, so changing a function in the IPython session changes the tool used by subsequent prompts. Async callables are awaited inside `ipyagent.codex_client` before their results are returned to app-server.
 
 ## Streaming And Display
 
@@ -281,7 +281,7 @@ Streaming and storage are deliberately separated.
 
 `astream_to_stdout()`:
 
-1. uses `ipycodex.codex_client.AsyncStreamFormatter` to iterate the response stream
+1. uses `ipyagent.codex_client.AsyncStreamFormatter` to iterate the response stream
 2. in a TTY, updates a `rich.live.Live` view with `Markdown(...)` as chunks arrive
 3. outside a TTY, writes raw chunks to stdout
 4. returns the full original text for storage
@@ -292,7 +292,7 @@ Display processing (`_display_text`):
 - `compact_tool_display` rewrites stored Codex command/tool detail blocks to a short `🔧 f(x=1) => 2` form
 - these affect only the visible terminal output; SQLite keeps the original response
 
-`ipycodex` wraps the streaming phase in a small guard that temporarily marks `shell.display_pub._is_publishing = True`. That keeps terminal-visible AI output out of IPython's normal stdout capture and therefore out of `output_history`, while still allowing `ipycodex` to store the full response in `ai_prompts`.
+`ipyagent` wraps the streaming phase in a small guard that temporarily marks `shell.display_pub._is_publishing = True`. That keeps terminal-visible AI output out of IPython's normal stdout capture and therefore out of `output_history`, while still allowing `ipyagent` to store the full response in `ai_prompts`.
 
 ## Keybindings
 
@@ -319,15 +319,15 @@ Creation behavior:
 
 - these files are created on demand when first needed
 - the initial `model` defaults from `IPYAI_MODEL` if present
-- runtime `%ipycodex model ...` and similar commands change only the live extension object, not the config file
+- runtime `%ipyagent model ...` and similar commands change only the live extension object, not the config file
 
 When `log_exact` is enabled, the log file contains the exact fully-expanded prompt passed to the model and the exact raw response returned from the stream.
 
 ## Tests
 
-To run ipycodex in isolation (no user config, startup, or history), set these environment variables:
+To run ipyagent in isolation (no user config, startup, or history), set these environment variables:
 
-- `XDG_CONFIG_HOME` — redirects ipycodex's config files (`config.json`, `sysp.txt`, `startup.ipynb`)
+- `XDG_CONFIG_HOME` — redirects ipyagent's config files (`config.json`, `sysp.txt`, `startup.ipynb`)
 - `IPYTHON_DIR` — redirects IPython's profile directory (prevents loading user `ipython_config.py` and startup scripts)
 - `--HistoryManager.hist_file=<path>` — isolates the history database
 
@@ -354,7 +354,7 @@ Coverage currently focuses on:
 - session persistence: CWD in remark, list sessions, resume session
 - code block extraction
 
-When changing behavior in [ipycodex/core.py](ipycodex/core.py), update or add the narrowest possible test in [tests/test_core.py](tests/test_core.py).
+When changing behavior in [ipyagent/core.py](ipyagent/core.py), update or add the narrowest possible test in [tests/test_core.py](tests/test_core.py).
 
 ## Common Change Points
 

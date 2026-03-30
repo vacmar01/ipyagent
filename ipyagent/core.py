@@ -35,7 +35,7 @@ DEFAULT_COMPLETION_MODEL = "Kimi K2.5"
 _COMPLETION_SP = "You are a code completion engine for IPython. Return ONLY the completion text that should be inserted at the cursor position. No explanation, no markdown, no code fences, no prefix repetition."
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 
-The user interacts with you through `ipycodex`, an IPython extension that turns input starting with a period into an AI prompt.
+The user interacts with you through `ipyagent`, an IPython extension that turns input starting with a period into an AI prompt.
 
 You may receive:
 - a `<context>` XML block containing recent IPython code, outputs, and notes
@@ -66,12 +66,12 @@ Only dynamic tools can see live IPython objects. Server-side shell and file acti
 
 Assume you are helping an interactive Python user. Prefer concise, accurate, practical responses. When writing code, default to Python unless the user asks for something else.
 """
-MAGIC_NAME = "ipycodex"
+MAGIC_NAME = "ipyagent"
 LAST_PROMPT = "_ai_last_prompt"
 LAST_RESPONSE = "_ai_last_response"
-EXTENSION_NS = "_ipycodex"
-EXTENSION_ATTR = "_ipycodex_extension"
-RESET_LINE_NS = "_ipycodex_reset_line"
+EXTENSION_NS = "_ipyagent"
+EXTENSION_ATTR = "_ipyagent_extension"
+RESET_LINE_NS = "_ipyagent_reset_line"
 PROMPTS_TABLE = "ai_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
 _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
@@ -90,7 +90,7 @@ def _ensure_prompts_table(db):
             db.execute(f"DROP TABLE {PROMPTS_TABLE}")
             db.execute(_PROMPTS_SQL)
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
-CONFIG_DIR = xdg_config_home()/"ipycodex"
+CONFIG_DIR = xdg_config_home()/"ipyagent"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
@@ -145,9 +145,9 @@ def _tag(name: str, content="", **attrs) -> str:
     return f"<{name}{ats}>{content}</{name}>"
 
 
-def _is_ipycodex_input(source: str) -> bool:
+def _is_ipyagent_input(source: str) -> bool:
     src = source.lstrip()
-    return src.startswith(".") or src.startswith("%ipycodex") or src.startswith("%%ipycodex")
+    return src.startswith(".") or src.startswith("%ipyagent") or src.startswith("%%ipyagent")
 
 
 def _is_note(source):
@@ -371,16 +371,16 @@ def _event_to_cell(o):
         source = o.get("source", "")
         if _is_note(source):
             return dict(id=_cell_id(), cell_type="markdown", source=_note_str(source),
-                metadata=dict(ipycodex=dict(kind="code", line=o.get("line", 0), source=source)))
-        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipycodex=dict(kind="code", line=o.get("line", 0))),
+                metadata=dict(ipyagent=dict(kind="code", line=o.get("line", 0), source=source)))
+        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyagent=dict(kind="code", line=o.get("line", 0))),
             outputs=[], execution_count=None)
     if o.get("kind") == "prompt":
         meta = dict(kind="prompt", line=o.get("line", 0), history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))
-        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipycodex=meta))
+        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipyagent=meta))
 
 
 def _cell_to_event(cell):
-    meta = cell.get("metadata", {}).get("ipycodex", {})
+    meta = cell.get("metadata", {}).get("ipyagent", {})
     kind = meta.get("kind")
     if kind == "code":
         source = meta.get("source") or cell.get("source", "")
@@ -391,7 +391,7 @@ def _cell_to_event(cell):
 
 
 def _load_notebook(path) -> list:
-    "Load events from an ipycodex .ipynb file."
+    "Load events from an ipyagent .ipynb file."
     path = Path(path)
     if not path.exists(): raise FileNotFoundError(f"Notebook not found: {path}")
     data = json.loads(path.read_text())
@@ -451,11 +451,11 @@ class AIMagics(Magics):
         super().__init__(shell)
         self.ext = ext
 
-    @line_magic("ipycodex")
-    def ipycodex_line(self, line: str=""): return self.ext.handle_line(line)
+    @line_magic("ipyagent")
+    def ipyagent_line(self, line: str=""): return self.ext.handle_line(line)
 
-    @cell_magic("ipycodex")
-    async def ipycodex_cell(self, line: str="", cell: str | None=None): await self.ext.run_prompt(cell)
+    @cell_magic("ipyagent")
+    async def ipyagent_cell(self, line: str="", cell: str | None=None): await self.ext.run_prompt(cell)
 
 
 class IPyAIExtension:
@@ -527,7 +527,7 @@ class IPyAIExtension:
         parts = []
         for _,line,pair in entries:
             source,output = pair
-            if not source or _is_ipycodex_input(source): continue
+            if not source or _is_ipyagent_input(source): continue
             if _is_note(source): parts.append(_tag("note", _note_str(source)))
             else:
                 parts.append(_tag("code", source))
@@ -574,7 +574,7 @@ class IPyAIExtension:
         events = []
         for _,line,pair in self.full_history():
             source,_ = pair
-            if not source or _is_ipycodex_input(source): continue
+            if not source or _is_ipyagent_input(source): continue
             events.append(dict(kind="code", line=line, source=source))
         for pid,prompt,response,history_line in self.prompt_records():
             events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, response=response))
@@ -584,7 +584,7 @@ class IPyAIExtension:
         path = Path(path)
         if path.suffix != '.ipynb': path = path.with_suffix('.ipynb')
         events = [{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()]
-        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)
+        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipyagent_version=1), nbformat=4, nbformat_minor=5)
         path.write_text(json.dumps(nb, indent=2) + "\n")
         return path, sum(o["kind"] == "code" for o in events), sum(o["kind"] == "prompt" for o in events)
 
@@ -707,7 +707,7 @@ class IPyAIExtension:
         def _lex_document(self, document):
             text = document.text.lstrip()
             if ext.prompt_mode and not text.startswith((';', '!', '%')): return _plain.lex_document(document)
-            if text.startswith('.') or text.startswith('%%ipycodex'): return _plain.lex_document(document)
+            if text.startswith('.') or text.startswith('%%ipyagent'): return _plain.lex_document(document)
             return _orig(self, document)
         IPythonPTLexer.lex_document = _lex_document
 
@@ -776,7 +776,7 @@ class IPyAIExtension:
             "Set thinking level"), ("prompt", "Toggle prompt mode"),
             ("save <file>", "Save session to .ipynb"), ("load <file>", "Load session from .ipynb"),
             ("reset", "Clear AI prompts from current session"), ("sessions", "List previous sessions")]
-        print("Usage: %ipycodex <command>\n")
+        print("Usage: %ipyagent <command>\n")
         for cmd, desc in cmds: print(f"  {cmd:20s} {desc}")
 
     def handle_line(self, line: str):
@@ -800,11 +800,11 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         clean = arg.strip()
         if cmd == "save":
-            if not clean: return print("Usage: %ipycodex save <filename>")
+            if not clean: return print("Usage: %ipyagent save <filename>")
             path, ncode, nprompt = self.save_notebook(clean)
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {path}.")
         if cmd == "load":
-            if not clean: return print("Usage: %ipycodex load <filename>")
+            if not clean: return print("Usage: %ipyagent load <filename>")
             try:
                 path, ncode, nprompt = self.load_notebook(clean)
                 return print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
@@ -815,7 +815,7 @@ class IPyAIExtension:
                 think=lambda: _validate_level("think", clean, self.think),
                 log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
-        return print(f"Unknown command: {line!r}. Run %ipycodex help for available commands.")
+        return print(f"Unknown command: {line!r}. Run %ipyagent help for available commands.")
 
     async def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
@@ -895,10 +895,10 @@ def create_extension(shell=None, resume=None, load=None, prompt_mode=False, **kw
         except FileNotFoundError as e: print(str(e))
     hm = shell.history_manager
     with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
-    if not getattr(shell, '_ipycodex_atexit', False):
+    if not getattr(shell, '_ipyagent_atexit', False):
         sid = hm.session_number
-        atexit.register(lambda: print(f"\nTo resume: ipycodex -r {sid}"))
-        shell._ipycodex_atexit = True
+        atexit.register(lambda: print(f"\nTo resume: ipyagent -r {sid}"))
+        shell._ipyagent_atexit = True
     return ext
 
 

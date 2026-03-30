@@ -1,6 +1,6 @@
 import asyncio,json
 
-import ipycodex.codex_client as cc
+import ipyagent.codex_client as cc
 
 
 class FakeClient:

@@ -4,13 +4,13 @@ from types import SimpleNamespace
 import pytest
 from IPython.core.inputtransformer2 import TransformerManager
 
-import ipycodex.core as core
-from ipycodex.core import (DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK, EXTENSION_NS,
+import ipyagent.core as core
+from ipyagent.core import (DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_PROVIDER, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK, EXTENSION_NS,
     IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     _extract_code_blocks, _format_var_xml, _git_repo_root, _list_sessions, _shell_names, _shell_refs,
     _thinking_to_blockquote, _run_shell_refs, _var_names, _var_refs, astream_to_stdout,
     prompt_from_lines, resume_session, transform_dots, transform_prompt_mode)
-from ipycodex.pi_client import PiToolBridge
+from ipyagent.pi_client import PiToolBridge
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -129,7 +129,7 @@ class DummyShell:
 
 @pytest.fixture(autouse=True)
 def _config_paths(monkeypatch, tmp_path):
-    cfg_dir = tmp_path/"ipycodex"
+    cfg_dir = tmp_path/"ipyagent"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(core, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(core, "CONFIG_PATH", cfg_dir/"config.json")
@@ -159,7 +159,7 @@ def test_transform_dots_executes_ai_magic_call():
         def run_cell_magic(self, magic, line, cell): seen.update(magic=magic, line=line, cell=cell)
     code = "".join(transform_dots([".hello\n", "world\n"]))
     exec(code, {"get_ipython": lambda: DummyIPython()})
-    assert seen == dict(magic="ipycodex", line="", cell="hello\nworld\n")
+    assert seen == dict(magic="ipyagent", line="", cell="hello\nworld\n")
 
 
 async def _chunks(*items):
@@ -449,7 +449,7 @@ def test_save_notebook_converts_notes_to_markdown_cells(tmp_path):
     nb = json.loads(path.read_text())
     c0 = {k:v for k,v in nb["cells"][0].items() if k != "id"}
     assert c0 == dict(cell_type="markdown", source="# My note",
-        metadata=dict(ipycodex=dict(kind="code", line=1, source='"# My note"')))
+        metadata=dict(ipyagent=dict(kind="code", line=1, source='"# My note"')))
     assert nb["cells"][1]["cell_type"] == "code"
     assert nb["cells"][1]["source"] == "x = 1"
 
@@ -484,11 +484,11 @@ def test_history_context_uses_lines_since_last_prompt_only():
 
 
 def test_load_notebook_replays_code_and_restores_prompts(tmp_path):
-    cells = [dict(cell_type="code", source="import math", metadata=dict(ipycodex=dict(kind="code", line=1)), outputs=[], execution_count=None),
-        dict(cell_type="markdown", source="hello", metadata=dict(ipycodex=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
-        dict(cell_type="code", source="x = 1", metadata=dict(ipycodex=dict(kind="code", line=3)), outputs=[], execution_count=None)]
+    cells = [dict(cell_type="code", source="import math", metadata=dict(ipyagent=dict(kind="code", line=1)), outputs=[], execution_count=None),
+        dict(cell_type="markdown", source="hello", metadata=dict(ipyagent=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
+        dict(cell_type="code", source="x = 1", metadata=dict(ipyagent=dict(kind="code", line=3)), outputs=[], execution_count=None)]
     nb_path = tmp_path / "test.ipynb"
-    nb_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)))
+    nb_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyagent_version=1), nbformat=4, nbformat_minor=5)))
     shell = DummyShell()
     shell.execution_count = 1
     ext = IPyAIExtension(shell=shell).load()
@@ -519,12 +519,12 @@ def test_save_writes_notebook(tmp_path, capsys):
     assert all("id" in c for c in nb["cells"])
     assert _strip_ids(nb) == dict(
         cells=[
-            dict(cell_type="code", source="import math", metadata=dict(ipycodex=dict(kind="code", line=1)), outputs=[], execution_count=None),
+            dict(cell_type="code", source="import math", metadata=dict(ipyagent=dict(kind="code", line=1)), outputs=[], execution_count=None),
             dict(cell_type="markdown", source="first response",
-                metadata=dict(ipycodex=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
-            dict(cell_type="code", source="x = 1", metadata=dict(ipycodex=dict(kind="code", line=3)), outputs=[], execution_count=None),
+                metadata=dict(ipyagent=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
+            dict(cell_type="code", source="x = 1", metadata=dict(ipyagent=dict(kind="code", line=3)), outputs=[], execution_count=None),
         ],
-        metadata=dict(ipycodex_version=1), nbformat=4, nbformat_minor=5)
+        metadata=dict(ipyagent_version=1), nbformat=4, nbformat_minor=5)
 
 
 async def test_log_exact_writes_full_prompt_and_response(dummy_pi):
@@ -547,7 +547,7 @@ def test_cleanup_transform_prevents_help_syntax_interference():
     tm.cleanup_transforms.insert(1, transform_dots)
 
     code = tm.transform_cell(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?")
-    assert code == "get_ipython().run_cell_magic('ipycodex', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
+    assert code == "get_ipython().run_cell_magic('ipyagent', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
     assert tm.check_complete(".I am testing my new AI prompt system.\\") == ("incomplete", 0)
     assert tm.check_complete(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
 
@@ -670,7 +670,7 @@ def test_sysprompt_mentions_variables_and_shell():
 def test_prompt_mode_wraps_input_as_magic():
     lines = transform_prompt_mode(["hello world\n"])
     assert "run_cell_magic" in lines[0]
-    assert "ipycodex" in lines[0]
+    assert "ipyagent" in lines[0]
     assert "hello world" in lines[0]
 
 def test_prompt_mode_passes_through_semicolon_as_python():
@@ -858,15 +858,15 @@ def test_handle_line_sessions():
     assert "hello world" in out
 
 
-def test_e2e_ipycodex_session(tmp_path):
-    "E2E: drive ipycodex interactively via pexpect — prompt, response, session lifecycle."
+def test_e2e_ipyagent_session(tmp_path):
+    "E2E: drive ipyagent interactively via pexpect — prompt, response, session lifecycle."
     import pexpect
     hist_file = str(tmp_path / "hist.sqlite")
     env = {k: v for k, v in os.environ.items() if k != 'IPYTHONNG_FLAGS'}
     env['XDG_CONFIG_HOME'] = str(tmp_path / "config")
     env['IPYTHON_DIR'] = str(tmp_path / "ipython")
 
-    args = ['-m', 'IPython', '--ext', 'ipycodex', f'--HistoryManager.hist_file={hist_file}',
+    args = ['-m', 'IPython', '--ext', 'ipyagent', f'--HistoryManager.hist_file={hist_file}',
         '--TerminalIPythonApp.display_banner=False', '--colors=NoColor']
     child = pexpect.spawn(sys.executable, args, env=env, timeout=60, encoding='utf-8')
 
@@ -886,8 +886,8 @@ def test_e2e_ipycodex_session(tmp_path):
     # Wait for next prompt (AI response finished)
     wait_prompt(3)
 
-    # Check %ipycodex sessions lists something
-    child.sendline('%ipycodex sessions')
+    # Check %ipyagent sessions lists something
+    child.sendline('%ipyagent sessions')
     wait_prompt(4)
 
     # Exit and check for resume message

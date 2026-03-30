@@ -58,7 +58,7 @@ async function connectToSocket(pi: ExtensionAPI, socketPath: string): Promise<vo
 }
 
 async function callPythonTool(name: string, args: any): Promise<any> {
-  if (!socket) throw new Error("Not connected to ipycodex");
+  if (!socket) throw new Error("Not connected to ipyagent");
 
   const requestId = Math.random().toString(36).slice(2);
 
@@ -105,7 +105,7 @@ function registerToolsFromMessage(pi: ExtensionAPI, msg: any) {
 }
 
 export default function (pi: ExtensionAPI) {
-  const socketPath = process.env.IPYCODEX_SOCK;
+  const socketPath = process.env.IPYAGENT_SOCK;
   if (!socketPath) return;
 
   pi.on("session_start", async () => {

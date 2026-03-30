@@ -1,52 +1,54 @@
-# ipycodex
+# ipyagent
 
-`ipycodex` is an IPython extension that turns any input starting with `.` into an AI prompt.
+`ipyagent` is an IPython extension that turns any input starting with `.` into an AI prompt.
 
-It is aimed at terminal IPython, not notebook frontends.
+It is aimed at terminal IPython, not notebook frontends. 
+
+It is a fork of [ipycodex](https://github.com/AnswerDotAI/ipycodex) by answer.ai
 
 ## Install
 
 ```bash
-pip install ipycodex
+pip install ipyagent
 ```
 
-`ipycodex` now talks to the local `codex app-server`, so you also need the `codex` CLI installed and authenticated on the machine running IPython. Set `IPYAI_CODEX_CMD` if `codex` is not on your `PATH` or you want to point at a different binary.
+`ipyagent` now talks to the local `pi` instance, so you also need the `pi` CLI installed and authenticated on the machine running IPython. 
 
 ## CLI
 
-`ipycodex` provides a standalone command that launches IPython with `ipycodex` and `ipythonng` extensions pre-loaded and output history enabled:
+`ipyagent` provides a standalone command that launches IPython with `ipyagent` and `ipythonng` extensions pre-loaded and output history enabled:
 
 ```bash
-ipycodex
+ipyagent
 ```
 
 Resume a previous session:
 
 ```bash
-ipycodex -r        # interactive session picker
-ipycodex -r 43     # resume session 43 directly
+ipyagent -r        # interactive session picker
+ipyagent -r 43     # resume session 43 directly
 ```
 
-On exit, `ipycodex` prints the session ID so you can resume later.
+On exit, `ipyagent` prints the session ID so you can resume later.
 
 ## Load As Extension
 
 ```python
-%load_ext ipycodex
+%load_ext ipyagent
 ```
 
 If you change the package in a running shell:
 
 ```python
-%reload_ext ipycodex
+%reload_ext ipyagent
 ```
 
-## How To Auto-Load `ipycodex`
+## How To Auto-Load `ipyagent`
 
 Add this to an `ipython_config.py` file used by terminal `ipython`:
 
 ```python
-c.TerminalIPythonApp.extensions = ["ipycodex.core"]
+c.TerminalIPythonApp.extensions = ["ipyagent.core"]
 ```
 
 Good places for that file include:
@@ -87,7 +89,7 @@ Backslash-Enter continuation in the terminal:
 with risks and rollback steps
 ```
 
-`ipycodex` also provides a line and cell magic named `%ipycodex` / `%%ipycodex`.
+`ipyagent` also provides a line and cell magic named `%ipyagent` / `%%ipyagent`.
 
 Note: `.01 * 3` and similar expressions starting with `.` followed by a digit will be interpreted as prompts. Write `0.01 * 3` instead.
 
@@ -101,25 +103,25 @@ Any IPython cell containing only a string literal is treated as a "note". Notes 
 
 Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. When saving a session, notes are stored as markdown cells in the startup notebook.
 
-## `%ipycodex` Commands
+## `%ipyagent` Commands
 
 ```python
-%ipycodex
-%ipycodex model gpt-5.4
-%ipycodex completion_model gpt-5.4-mini
-%ipycodex think m
-%ipycodex search h
-%ipycodex code_theme monokai
-%ipycodex log_exact true
-%ipycodex save
-%ipycodex reset
+%ipyagent
+%ipyagent model gpt-5.4
+%ipyagent completion_model gpt-5.4-mini
+%ipyagent think m
+%ipyagent search h
+%ipyagent code_theme monokai
+%ipyagent log_exact true
+%ipyagent save
+%ipyagent reset
 ```
 
-- `%ipycodex` — show current settings and config file paths
-- `%ipycodex model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
-- `%ipycodex save` — save the current session (code, notes, and AI history) to `startup.ipynb`
-- `%ipycodex reset` — clear AI prompt history for the current session
-- `%ipycodex sessions` — list resumable sessions for the current directory (falls back to git repo root)
+- `%ipyagent` — show current settings and config file paths
+- `%ipyagent model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
+- `%ipyagent save` — save the current session (code, notes, and AI history) to `startup.ipynb`
+- `%ipyagent reset` — clear AI prompt history for the current session
+- `%ipyagent sessions` — list resumable sessions for the current directory (falls back to git repo root)
 
 ## Tools
 
@@ -145,7 +147,7 @@ In addition to those dynamic tools, the Codex app-server can use its own built-i
 
 ## Skills
 
-`ipycodex` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
+`ipyagent` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
 
 - `.agents/skills/` in the current directory and every parent directory
 - `~/.config/agents/skills/`
@@ -169,7 +171,7 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 ## Keyboard Shortcuts
 
-`ipycodex` registers prompt_toolkit keybindings:
+`ipyagent` registers prompt_toolkit keybindings:
 
 | Shortcut | Action |
 |---|---|
@@ -181,16 +183,16 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 Code blocks are extracted from fenced markdown blocks tagged as `python` or `py`. Blocks tagged with other languages (bash, json, etc.) or untagged blocks are skipped.
 
-Syntax highlighting is disabled while typing `.` prompts and `%%ipycodex` cells so natural language isn't coloured as Python.
+Syntax highlighting is disabled while typing `.` prompts and `%%ipyagent` cells so natural language isn't coloured as Python.
 
 ## Startup Replay
 
-`%ipycodex save` snapshots the current session to `~/.config/ipycodex/startup.ipynb`:
+`%ipyagent save` snapshots the current session to `~/.config/ipyagent/startup.ipynb`:
 
 - code cells are saved as code cells (notes become markdown cells)
 - AI prompts are saved with the response as markdown and the prompt in cell metadata
 
-When `ipycodex` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
+When `ipyagent` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
 
 ## Output Rendering
 
@@ -198,7 +200,7 @@ Responses are streamed and rendered as markdown in the terminal via Rich. Model 
 
 ## Configuration
 
-Config files live under `~/.config/ipycodex/` and are created on demand:
+Config files live under `~/.config/ipyagent/` and are created on demand:
 
 | File | Purpose |
 |---|---|

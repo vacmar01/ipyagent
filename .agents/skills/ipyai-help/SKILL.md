@@ -1,19 +1,19 @@
 ---
-name: ipycodex-help
-allowed-tools: is_ipycodexskill_loaded
-description: Explains ipycodex usage, commands, configuration, and features. Use when the user asks how to use ipycodex, what commands are available, or needs help with ipycodex configuration.
+name: ipyagent-help
+allowed-tools: is_ipyagentskill_loaded
+description: Explains ipyagent usage, commands, configuration, and features. Use when the user asks how to use ipyagent, what commands are available, or needs help with ipyagent configuration.
 ---
 
-# ipycodex Help
+# ipyagent Help
 
-ipycodex is an IPython extension that turns any input starting with `.` into an AI prompt.
+ipyagent is an IPython extension that turns any input starting with `.` into an AI prompt.
 
 ## Quick Start
 
 Load the extension:
 
 ```python
-%load_ext ipycodex
+%load_ext ipyagent
 ```
 
 Then type a period followed by your prompt:
@@ -24,14 +24,14 @@ Then type a period followed by your prompt:
 
 ## Commands
 
-- `%ipycodex` — show current settings (model, think level, search level, code theme, log flag, config paths)
-- `%ipycodex model <name>` — change model for this session (e.g. `%ipycodex model claude-sonnet-4-6`)
-- `%ipycodex think <level>` — set thinking level: `l`, `m`, or `h`
-- `%ipycodex search <level>` — set search level: `l`, `m`, or `h`
-- `%ipycodex code_theme <name>` — set Rich code theme (e.g. `monokai`, `github-dark`)
-- `%ipycodex log_exact <bool>` — enable/disable exact prompt/response logging
-- `%ipycodex save` — save current session (code + AI history) to startup file
-- `%ipycodex reset` — clear AI prompt history for current session
+- `%ipyagent` — show current settings (model, think level, search level, code theme, log flag, config paths)
+- `%ipyagent model <name>` — change model for this session (e.g. `%ipyagent model claude-sonnet-4-6`)
+- `%ipyagent think <level>` — set thinking level: `l`, `m`, or `h`
+- `%ipyagent search <level>` — set search level: `l`, `m`, or `h`
+- `%ipyagent code_theme <name>` — set Rich code theme (e.g. `monokai`, `github-dark`)
+- `%ipyagent log_exact <bool>` — enable/disable exact prompt/response logging
+- `%ipyagent save` — save current session (code + AI history) to startup file
+- `%ipyagent reset` — clear AI prompt history for current session
 
 ## Tools
 
@@ -43,12 +43,12 @@ def weather(city): return f"Sunny in {city}"
 . use `use &`weather` to check Brisbane`weather` to check Brisbane
 ```
 
-With `#|eval: true` as the first line, the code is run when the skill is loaded. For example, after loading this, you can run `is_ipycodexskill_loaded()`:
+With `#|eval: true` as the first line, the code is run when the skill is loaded. For example, after loading this, you can run `is_ipyagentskill_loaded()`:
 
 ```python
 #|eval: true
-def is_ipycodexskill_loaded():
-    "A test tool for the ipycodex skill"
+def is_ipyagentskill_loaded():
+    "A test tool for the ipyagent skill"
     return True
 ```
 
@@ -62,10 +62,10 @@ Any IPython cell containing only a string literal is treated as a "note". Notes 
 
 ## Configuration Files
 
-- `~/.config/ipycodex/config.json` — model, think, search, code_theme, log_exact
-- `~/.config/ipycodex/sysp.txt` — system prompt
-- `~/.config/ipycodex/startup.ipynb` — saved session snapshot
-- `~/.config/ipycodex/exact-log.jsonl` — raw prompt/response log (when enabled)
+- `~/.config/ipyagent/config.json` — model, think, search, code_theme, log_exact
+- `~/.config/ipyagent/sysp.txt` — system prompt
+- `~/.config/ipyagent/startup.ipynb` — saved session snapshot
+- `~/.config/ipyagent/exact-log.jsonl` — raw prompt/response log (when enabled)
 
 ## Multiline Prompts
 

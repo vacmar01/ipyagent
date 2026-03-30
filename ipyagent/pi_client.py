@@ -1,4 +1,4 @@
-"""pi backend client for ipycodex - RPC communication with pi coding agent"""
+"""pi backend client for ipyagent - RPC communication with pi coding agent"""
 
 import asyncio
 import json
@@ -85,8 +85,8 @@ class PiToolBridge:
         """Get socket path, preferring $XDG_RUNTIME_DIR with fallback to /tmp"""
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
         if runtime_dir:
-            return Path(runtime_dir) / f"ipycodex-{os.getpid()}.sock"
-        return Path(f"/tmp/ipycodex-{os.getpid()}.sock")
+            return Path(runtime_dir) / f"ipyagent-{os.getpid()}.sock"
+        return Path(f"/tmp/ipyagent-{os.getpid()}.sock")
 
     async def start(self):
         """Start the Unix socket server"""
@@ -248,7 +248,7 @@ class PiClient:
         ]
 
         env = os.environ.copy()
-        env["IPYCODEX_SOCK"] = str(self.bridge.socket_path)
+        env["IPYAGENT_SOCK"] = str(self.bridge.socket_path)
 
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
