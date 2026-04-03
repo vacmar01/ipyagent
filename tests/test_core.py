@@ -52,7 +52,9 @@ class DummyLive:
         type(self).instances.append(self)
 
     def __enter__(self): return self
-    def __exit__(self, exc_type, exc, tb): self.kwargs["console"].print(self.renderables[-1])
+    def __exit__(self, exc_type, exc, tb):
+        if not self.kwargs.get("transient"):
+            self.kwargs["console"].print(self.renderables[-1])
     def update(self, renderable, refresh=False): self.renderables.append(renderable)
 
 class DummyPiChat:
@@ -193,6 +195,8 @@ def test_astream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
     text = run_stream(tool_text, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
     assert text == tool_text
     assert "🔧 f() => ok" in DummyLive.instances[-1].renderables[-1].text
+    assert DummyLive.instances[-1].kwargs["transient"] is True
+    assert DummyLive.instances[-1].kwargs["vertical_overflow"] == "crop"
 
 
 def test_astream_to_stdout_uses_rich_markdown_options_for_live_updates():
@@ -228,7 +232,7 @@ def test_astream_to_stdout_tty_uses_formatter_display_and_final_text():
 
     assert text == "stored response"
     assert [o.text for o in DummyLive.instances[-1].renderables] == ["⌛ running", "final answer"]
-    assert out.getvalue() == "RICH:final answer"
+    assert out.getvalue() == "RICH:stored response"
 
 
 async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_pi):
