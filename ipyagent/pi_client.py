@@ -227,6 +227,9 @@ class PiClient:
         self.bridge = PiToolBridge(user_ns=self.user_ns)
         await self.bridge.start()
 
+        # Get the path to the extension file inside the package
+        ext_path = Path(__file__).parent / "extensions" / "ipyagent-bridge.ts"
+        
         cmd = [
             "pi",
             "--mode",
@@ -234,6 +237,8 @@ class PiClient:
             "--no-session",
             "--tools",
             "bash",
+            "--extension",
+            str(ext_path),
             "--system-prompt",
             self.system_prompt,
             "--provider",
@@ -251,7 +256,6 @@ class PiClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=None,
             env=env,
-            cwd=str(Path(__file__).parent.parent),
         )
 
     async def stop(self):

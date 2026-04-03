@@ -38,6 +38,9 @@ version = {attr = "ipyagent.__version__"}
 [tool.setuptools.packages.find]
 include = ["ipyagent*"]
 
+[tool.setuptools.package-data]
+ipyagent = ["extensions/*.ts"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning:pty"]
